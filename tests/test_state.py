@@ -1,4 +1,24 @@
-from secscan.state import RepoRecord, StateStore, Status
+from secscan.state import RepoRecord, StateStore, Status, _dialect_for, _MYSQL_DIALECT, _SQLITE_DIALECT
+
+
+def test_dialect_for_selects_mysql_on_url():
+    d = _dialect_for("mysql://user:pass@host:3306/secscan")
+    assert d is _MYSQL_DIALECT
+    assert d.placeholder == "%s"
+    assert d.insert_ignore == "INSERT IGNORE INTO"
+
+
+def test_dialect_for_selects_sqlite_for_path(tmp_path):
+    assert _dialect_for(tmp_path / "s.sqlite3") is _SQLITE_DIALECT
+    assert _dialect_for("output/secscan.sqlite3") is _SQLITE_DIALECT
+    assert _SQLITE_DIALECT.placeholder == "?"
+
+
+def test_store_translates_placeholders_for_dialect(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    assert store._ph("SELECT ? , ?") == "SELECT ? , ?"  # sqlite: unchanged
+    store._d = _MYSQL_DIALECT  # exercise translation without a live server
+    assert store._ph("SELECT ? , ?") == "SELECT %s , %s"
 
 
 def test_upsert_and_get(tmp_path):
