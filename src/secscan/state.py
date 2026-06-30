@@ -1,12 +1,16 @@
-"""Resumable state manifest backed by SQLite.
+"""Resumable state manifest backed by SQLite or MySQL.
 
-One row per repository, keyed by (owner, repo). Lets long multi-repo runs be
-interrupted and resumed, and lets `secscan report` rebuild summary.csv afterwards.
+One row per repository in `repos`, keyed by (owner, repo). Lets long multi-repo runs
+be interrupted and resumed, and lets `secscan report` rebuild summary.csv afterwards.
+
+The backend is chosen from the target passed to `StateStore`: a `mysql://…` URL selects
+MySQL (via mysqlclient); anything else is a SQLite file path (the default).
 """
 
 from __future__ import annotations
 
 import sqlite3
+import urllib.parse
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -39,7 +43,9 @@ class RepoRecord:
         return f"{self.owner}/{self.repo}"
 
 
-_SCHEMA = """
+# -- schema (per dialect) -------------------------------------------------------
+
+_REPOS_SQLITE = """
 CREATE TABLE IF NOT EXISTS repos (
     owner          TEXT NOT NULL,
     repo           TEXT NOT NULL,
@@ -55,28 +61,110 @@ CREATE TABLE IF NOT EXISTS repos (
 );
 """
 
+_REPOS_MYSQL = """
+CREATE TABLE IF NOT EXISTS repos (
+    owner          VARCHAR(255) NOT NULL,
+    repo           VARCHAR(255) NOT NULL,
+    status         VARCHAR(32) NOT NULL DEFAULT 'pending',
+    critical_count INTEGER NOT NULL DEFAULT 0,
+    high_count     INTEGER NOT NULL DEFAULT 0,
+    total_findings INTEGER NOT NULL DEFAULT 0,
+    duration_s     DOUBLE NOT NULL DEFAULT 0,
+    cost_usd       DOUBLE NOT NULL DEFAULT 0,
+    reviewed_at    VARCHAR(64) NOT NULL DEFAULT '',
+    error          TEXT,
+    PRIMARY KEY (owner, repo)
+);
+"""
+
+
+@dataclass(frozen=True)
+class _Dialect:
+    placeholder: str
+    insert_ignore: str
+    schema: tuple[str, ...]
+
+
+_SQLITE_DIALECT = _Dialect(
+    placeholder="?",
+    insert_ignore="INSERT OR IGNORE INTO",
+    schema=(_REPOS_SQLITE,),
+)
+
+_MYSQL_DIALECT = _Dialect(
+    placeholder="%s",
+    insert_ignore="INSERT IGNORE INTO",
+    schema=(_REPOS_MYSQL,),
+)
+
+
+def _is_mysql(target: str | Path) -> bool:
+    return isinstance(target, str) and target.startswith("mysql://")
+
+
+def _dialect_for(target: str | Path) -> _Dialect:
+    return _MYSQL_DIALECT if _is_mysql(target) else _SQLITE_DIALECT
+
+
+def _connect_sqlite(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _connect_mysql(url: str):
+    import MySQLdb
+    from MySQLdb.cursors import DictCursor
+
+    p = urllib.parse.urlparse(url)
+    return MySQLdb.connect(
+        host=p.hostname or "localhost",
+        port=p.port or 3306,
+        user=urllib.parse.unquote(p.username or ""),
+        passwd=urllib.parse.unquote(p.password or ""),
+        db=p.path.lstrip("/"),
+        charset="utf8mb4",
+        cursorclass=DictCursor,
+    )
+
 
 class StateStore:
-    def __init__(self, db_path: Path | str):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute(_SCHEMA)
+    def __init__(self, target: str | Path):
+        self._d = _dialect_for(target)
+        if _is_mysql(target):
+            self._conn = _connect_mysql(str(target))
+        else:
+            self._conn = _connect_sqlite(Path(target))
+        cur = self._conn.cursor()
+        for stmt in self._d.schema:
+            cur.execute(stmt)
         self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
 
+    # -- internals --------------------------------------------------------------
+
+    def _ph(self, sql: str) -> str:
+        if self._d.placeholder == "?":
+            return sql
+        return sql.replace("?", self._d.placeholder)
+
+    def _exec(self, sql: str, params: tuple = ()):
+        cur = self._conn.cursor()
+        cur.execute(self._ph(sql), params)
+        self._conn.commit()
+        return cur
+
     # -- writes -----------------------------------------------------------------
 
     def upsert_pending(self, owner: str, repo: str) -> None:
         """Insert a pending row if the repo is unknown; never downgrade an existing one."""
-        self._conn.execute(
-            "INSERT OR IGNORE INTO repos (owner, repo, status) VALUES (?, ?, ?)",
+        self._exec(
+            f"{self._d.insert_ignore} repos (owner, repo, status) VALUES (?, ?, ?)",
             (owner, repo, Status.PENDING.value),
         )
-        self._conn.commit()
 
     def mark(self, owner: str, repo: str, status: Status, **fields) -> None:
         self.upsert_pending(owner, repo)
@@ -87,10 +175,9 @@ class StateStore:
             vals.append(value)
         assignments = ", ".join(f"{c} = ?" for c in cols)
         vals.extend([owner, repo])
-        self._conn.execute(
-            f"UPDATE repos SET {assignments} WHERE owner = ? AND repo = ?", vals
+        self._exec(
+            f"UPDATE repos SET {assignments} WHERE owner = ? AND repo = ?", tuple(vals)
         )
-        self._conn.commit()
 
     def record_result(
         self,
@@ -123,9 +210,10 @@ class StateStore:
     # -- reads ------------------------------------------------------------------
 
     def get(self, owner: str, repo: str) -> RepoRecord | None:
-        row = self._conn.execute(
+        cur = self._exec(
             "SELECT * FROM repos WHERE owner = ? AND repo = ?", (owner, repo)
-        ).fetchone()
+        )
+        row = cur.fetchone()
         return self._to_record(row) if row else None
 
     def is_done(self, owner: str, repo: str) -> bool:
@@ -133,13 +221,11 @@ class StateStore:
         return rec is not None and rec.status == Status.DONE
 
     def all_records(self) -> list[RepoRecord]:
-        rows = self._conn.execute(
-            "SELECT * FROM repos ORDER BY owner, repo"
-        ).fetchall()
-        return [self._to_record(r) for r in rows]
+        cur = self._exec("SELECT * FROM repos ORDER BY owner, repo")
+        return [self._to_record(r) for r in cur.fetchall()]
 
     @staticmethod
-    def _to_record(row: sqlite3.Row) -> RepoRecord:
+    def _to_record(row) -> RepoRecord:
         return RepoRecord(
             owner=row["owner"],
             repo=row["repo"],
@@ -150,5 +236,5 @@ class StateStore:
             duration_s=row["duration_s"],
             cost_usd=row["cost_usd"],
             reviewed_at=row["reviewed_at"],
-            error=row["error"],
+            error=row["error"] or "",
         )
