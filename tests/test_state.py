@@ -1,4 +1,9 @@
 from secscan.state import RepoRecord, StateStore, Status, _dialect_for, _MYSQL_DIALECT, _SQLITE_DIALECT
+from secscan.findings import Finding
+
+
+def _f(severity, title):
+    return Finding(severity=severity, title=title, description="d")
 
 
 def test_dialect_for_selects_mysql_on_url():
@@ -90,3 +95,26 @@ def test_repo_record_is_dataclass_usable_for_summary():
     rec = RepoRecord(owner="octo", repo="repo", status=Status.DONE)
     d = dataclasses.asdict(rec)
     assert d["owner"] == "octo"
+
+
+def test_replace_findings_round_trip(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_findings("octo", "repo", [_f("critical", "sqli"), _f("high", "xss")])
+    rows = store.get_findings("octo", "repo")
+    assert {r["title"] for r in rows} == {"sqli", "xss"}
+    assert {r["severity"] for r in rows} == {"critical", "high"}
+
+
+def test_replace_findings_replaces_not_appends(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_findings("octo", "repo", [_f("high", "first")])
+    store.replace_findings("octo", "repo", [_f("critical", "second")])
+    rows = store.get_findings("octo", "repo")
+    assert [r["title"] for r in rows] == ["second"]
+
+
+def test_replace_findings_empty_clears(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_findings("octo", "repo", [_f("high", "first")])
+    store.replace_findings("octo", "repo", [])
+    assert store.get_findings("octo", "repo") == []

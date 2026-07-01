@@ -14,6 +14,10 @@ import urllib.parse
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from .findings import Finding
 
 
 class Status(str, Enum):
@@ -77,6 +81,38 @@ CREATE TABLE IF NOT EXISTS repos (
 );
 """
 
+_FINDINGS_SQLITE = """
+CREATE TABLE IF NOT EXISTS findings (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner          TEXT NOT NULL,
+    repo           TEXT NOT NULL,
+    severity       TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    category       TEXT NOT NULL DEFAULT '',
+    file_path      TEXT NOT NULL DEFAULT '',
+    line_range     TEXT NOT NULL DEFAULT '',
+    confidence     TEXT NOT NULL DEFAULT '',
+    description    TEXT NOT NULL DEFAULT '',
+    recommendation TEXT NOT NULL DEFAULT ''
+);
+"""
+
+_FINDINGS_MYSQL = """
+CREATE TABLE IF NOT EXISTS findings (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    owner          VARCHAR(255) NOT NULL,
+    repo           VARCHAR(255) NOT NULL,
+    severity       VARCHAR(32) NOT NULL,
+    title          TEXT NOT NULL,
+    category       VARCHAR(255) NOT NULL DEFAULT '',
+    file_path      TEXT NOT NULL,
+    line_range     VARCHAR(255) NOT NULL DEFAULT '',
+    confidence     VARCHAR(32) NOT NULL DEFAULT '',
+    description    TEXT NOT NULL,
+    recommendation TEXT NOT NULL
+);
+"""
+
 
 @dataclass(frozen=True)
 class _Dialect:
@@ -88,13 +124,13 @@ class _Dialect:
 _SQLITE_DIALECT = _Dialect(
     placeholder="?",
     insert_ignore="INSERT OR IGNORE INTO",
-    schema=(_REPOS_SQLITE,),
+    schema=(_REPOS_SQLITE, _FINDINGS_SQLITE),
 )
 
 _MYSQL_DIALECT = _Dialect(
     placeholder="%s",
     insert_ignore="INSERT IGNORE INTO",
-    schema=(_REPOS_MYSQL,),
+    schema=(_REPOS_MYSQL, _FINDINGS_MYSQL),
 )
 
 
@@ -206,6 +242,39 @@ class StateStore:
 
     def record_failure(self, owner: str, repo: str, error: str) -> None:
         self.mark(owner, repo, Status.FAILED, error=error)
+
+    _FINDING_COLS = (
+        "owner", "repo", "severity", "title", "category",
+        "file_path", "line_range", "confidence", "description", "recommendation",
+    )
+
+    def replace_findings(self, owner: str, repo: str, findings: "Iterable[Finding]") -> None:
+        """Replace all stored findings for a repo (delete-then-insert), one transaction."""
+        cur = self._conn.cursor()
+        cur.execute(
+            self._ph("DELETE FROM findings WHERE owner = ? AND repo = ?"), (owner, repo)
+        )
+        rows = [
+            (
+                owner, repo, f.severity.value, f.title, f.category,
+                f.file_path, f.line_range, f.confidence, f.description, f.recommendation,
+            )
+            for f in findings
+        ]
+        if rows:
+            cols = ", ".join(self._FINDING_COLS)
+            marks = ", ".join("?" for _ in self._FINDING_COLS)
+            cur.executemany(
+                self._ph(f"INSERT INTO findings ({cols}) VALUES ({marks})"), rows
+            )
+        self._conn.commit()
+
+    def get_findings(self, owner: str, repo: str) -> list[dict]:
+        cur = self._exec(
+            "SELECT * FROM findings WHERE owner = ? AND repo = ? ORDER BY id",
+            (owner, repo),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
     # -- reads ------------------------------------------------------------------
 
