@@ -21,6 +21,12 @@ app = typer.Typer(
 )
 
 
+def _resolve_db_url(db_url: str | None) -> str | None:
+    import os
+
+    return db_url or os.environ.get("SECSCAN_DB_URL") or None
+
+
 def _run_config(
     output_dir: Path,
     concurrency: int,
@@ -33,10 +39,12 @@ def _run_config(
     keep_clones: bool,
     resume: bool,
     limit: int | None,
+    db_url: str | None = None,
 ) -> RunConfig:
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
+        db_url=db_url,
         filters=Filters(
             include_archived=include_archived,
             include_forks=include_forks,
@@ -57,6 +65,7 @@ def run(
     org: str = typer.Option(None, help="Limit to a single org/owner login."),
     repos_file: Path = typer.Option(None, help="Allowlist file, one 'owner/repo' per line."),
     output_dir: Path = typer.Option(Path("output"), help="Where CSVs and state live."),
+    db_url: str = typer.Option(None, help="MySQL URL (mysql://user:pass@host:3306/db). Defaults to SECSCAN_DB_URL or local SQLite."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews."),
     max_turns: int = typer.Option(60, help="Max agent turns per repo review."),
@@ -76,6 +85,7 @@ def run(
     cfg = _run_config(
         output_dir, concurrency, model, max_turns, max_cost_usd,
         include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
+        db_url=_resolve_db_url(db_url),
     )
     asyncio.run(run_scan(cfg, org=org, repos_file=repos_file))
 
@@ -120,12 +130,14 @@ def review(
 @app.command()
 def report(
     output_dir: Path = typer.Option(Path("output"), help="Where state and CSVs live."),
+    db_url: str = typer.Option(None, help="MySQL URL; defaults to SECSCAN_DB_URL or local SQLite."),
 ) -> None:
     """Rebuild summary.csv from the state database."""
     from .findings import write_summary_csv
     from .state import StateStore
 
-    store = StateStore(output_dir / "secscan.sqlite3")
+    target = _resolve_db_url(db_url) or (output_dir / "secscan.sqlite3")
+    store = StateStore(target)
     rows = store.all_records()
     out = write_summary_csv(output_dir / "summary.csv", rows)
     typer.echo(f"Wrote {out} ({len(rows)} repos)")

@@ -57,6 +57,7 @@ class RunConfig:
 
     output_dir: Path = Path("output")
     state_db: Path = Path("output/secscan.sqlite3")
+    db_url: str | None = None  # mysql://… selects MySQL; None uses state_db (SQLite)
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     model: str = "sonnet"
@@ -69,6 +70,10 @@ class RunConfig:
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.state_db = Path(self.state_db)
+
+    @property
+    def state_target(self) -> "str | Path":
+        return self.db_url or self.state_db
 
 
 class ConfigError(Exception):
