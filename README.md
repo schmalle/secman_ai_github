@@ -25,6 +25,9 @@ treated as untrusted data (prompt-injection aware).
   out to it. Auth via `ANTHROPIC_API_KEY` **or** a logged-in Claude subscription.
 - A **GitHub App** installed on the target org(s)/repos with permissions:
   **Contents: Read**, **Metadata: Read**. You need its App ID and a private key (`.pem`).
+- (Optional) MySQL: to store state and findings in MySQL instead of the local SQLite
+  file, install the `mysqlclient` system libs (macOS `brew install mysql-client`;
+  Debian/Ubuntu `apt-get install default-libmysqlclient-dev pkg-config`).
 
 ## Configuration
 
@@ -36,6 +39,7 @@ Set via environment (a `.env` you source yourself works fine):
 | `GITHUB_APP_PRIVATE_KEY` | PEM contents, or… |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | …path to the `.pem` file |
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
+| `SECSCAN_DB_URL` | MySQL URL (`mysql://user:pass@host:3306/secscan`) for state + findings. Unset = local SQLite file. |
 
 ## Usage
 
@@ -48,6 +52,7 @@ uv run secscan run --limit 1              # full pipeline, one repo (smoke test)
 uv run secscan run --org my-org           # scope to one org
 uv run secscan run                        # all reachable repos
 uv run secscan report                     # rebuild summary.csv from state
+uv run secscan run --db-url mysql://user:pass@host:3306/secscan   # state + findings in MySQL
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
