@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS repos (
 );
 """
 
+# `error` is nullable TEXT here (no DEFAULT): MySQL historically disallows
+# non-constant defaults on TEXT columns. `_to_record` coerces NULL -> "" so
+# RepoRecord.error matches the SQLite `NOT NULL DEFAULT ''` behavior.
 _REPOS_MYSQL = """
 CREATE TABLE IF NOT EXISTS repos (
     owner          VARCHAR(255) NOT NULL,
@@ -149,20 +152,29 @@ def _connect_sqlite(path: Path):
     return conn
 
 
-def _connect_mysql(url: str):
-    import MySQLdb
-    from MySQLdb.cursors import DictCursor
+def _mysql_conn_kwargs(url: str) -> dict:
+    """Parse a mysql:// URL into MySQLdb.connect kwargs.
 
+    Special characters (``@``, ``:``, ``/``) in the username or password must be
+    percent-encoded in the URL, per the standard DSN convention; they are decoded
+    here via unquote(). An unescaped ``@`` in the password will misparse.
+    """
     p = urllib.parse.urlparse(url)
-    return MySQLdb.connect(
+    return dict(
         host=p.hostname or "localhost",
         port=p.port or 3306,
         user=urllib.parse.unquote(p.username or ""),
         passwd=urllib.parse.unquote(p.password or ""),
         db=p.path.lstrip("/"),
         charset="utf8mb4",
-        cursorclass=DictCursor,
     )
+
+
+def _connect_mysql(url: str):
+    import MySQLdb
+    from MySQLdb.cursors import DictCursor
+
+    return MySQLdb.connect(cursorclass=DictCursor, **_mysql_conn_kwargs(url))
 
 
 class StateStore:

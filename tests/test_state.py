@@ -1,4 +1,4 @@
-from secscan.state import RepoRecord, StateStore, Status, _dialect_for, _MYSQL_DIALECT, _SQLITE_DIALECT
+from secscan.state import RepoRecord, StateStore, Status, _dialect_for, _MYSQL_DIALECT, _SQLITE_DIALECT, _mysql_conn_kwargs
 from secscan.findings import Finding
 
 
@@ -118,3 +118,24 @@ def test_replace_findings_empty_clears(tmp_path):
     store.replace_findings("octo", "repo", [_f("high", "first")])
     store.replace_findings("octo", "repo", [])
     assert store.get_findings("octo", "repo") == []
+
+
+def test_mysql_conn_kwargs_parses_url():
+    kw = _mysql_conn_kwargs("mysql://alice:s3cr3t@db.example.com:3307/secscan")
+    assert kw["host"] == "db.example.com"
+    assert kw["port"] == 3307
+    assert kw["user"] == "alice"
+    assert kw["passwd"] == "s3cr3t"
+    assert kw["db"] == "secscan"
+    assert kw["charset"] == "utf8mb4"
+
+
+def test_mysql_conn_kwargs_decodes_percent_encoded_password():
+    kw = _mysql_conn_kwargs("mysql://user:p%40ss%3Aword@host/db")
+    assert kw["passwd"] == "p@ss:word"
+
+
+def test_mysql_conn_kwargs_defaults_host_and_port():
+    kw = _mysql_conn_kwargs("mysql://user:pw@/db")
+    assert kw["host"] == "localhost"
+    assert kw["port"] == 3306

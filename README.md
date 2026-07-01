@@ -41,6 +41,8 @@ Set via environment (a `.env` you source yourself works fine):
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
 | `SECSCAN_DB_URL` | MySQL URL (`mysql://user:pass@host:3306/secscan`) for state + findings. Unset = local SQLite file. |
 
+> **Note:** In `SECSCAN_DB_URL`, percent-encode any special characters (`@`, `:`, `/`) in the username or password (e.g. `p@ss` → `p%40ss`).
+
 ## Usage
 
 ```bash
