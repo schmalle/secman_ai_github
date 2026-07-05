@@ -1,10 +1,11 @@
-"""Resumable state manifest backed by SQLite or MySQL.
+"""Resumable state manifest backed by SQLite or MySQL/MariaDB.
 
 One row per repository in `repos`, keyed by (owner, repo). Lets long multi-repo runs
 be interrupted and resumed, and lets `secscan report` rebuild summary.csv afterwards.
 
-The backend is chosen from the target passed to `StateStore`: a `mysql://…` URL selects
-MySQL (via mysqlclient); anything else is a SQLite file path (the default).
+The backend is chosen from the target passed to `StateStore`: a `mysql://…` (or
+`mariadb://…`) URL selects MySQL/MariaDB (via mysqlclient, the `mysql` extra);
+anything else is a SQLite file path (the default).
 """
 
 from __future__ import annotations
@@ -136,7 +137,7 @@ _MYSQL_DIALECT = _Dialect(
 
 
 def _is_mysql(target: str | Path) -> bool:
-    return isinstance(target, str) and target.startswith("mysql://")
+    return isinstance(target, str) and target.startswith(("mysql://", "mariadb://"))
 
 
 def _dialect_for(target: str | Path) -> _Dialect:
@@ -151,8 +152,15 @@ def _connect_sqlite(path: Path):
 
 
 def _connect_mysql(url: str):
-    import MySQLdb
-    from MySQLdb.cursors import DictCursor
+    try:
+        import MySQLdb
+        from MySQLdb.cursors import DictCursor
+    except ImportError as exc:
+        from .config import ConfigError
+
+        raise ConfigError(
+            "MySQL/MariaDB backend requires the 'mysql' extra: uv sync --extra mysql"
+        ) from exc
 
     p = urllib.parse.urlparse(url)
     return MySQLdb.connect(
