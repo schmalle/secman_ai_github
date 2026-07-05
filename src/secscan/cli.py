@@ -2,6 +2,7 @@
 
 Commands:
   run         enumerate + clone + review reachable repos, write CSVs
+  scan        clone + review a single remote repo by 'owner/name'
   list-repos  enumerate + filter only (no review) — show what would be scanned
   review      review a single local repo directory (dev/test loop, no GitHub)
   report      rebuild the aggregate summary.csv from the state DB
@@ -166,6 +167,31 @@ def review(
         provider=provider,
     )
     asyncio.run(review_local(cfg, path))
+
+
+@app.command()
+def scan(
+    full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the CSV and state live."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
+    provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
+    max_turns: int = typer.Option(60, help="Max agent turns for the review."),
+    max_cost_usd: float = typer.Option(None, help="Cost abort threshold (USD)."),
+    keep_clones: bool = typer.Option(False, help="Keep the clone instead of deleting it."),
+) -> None:
+    """Clone one remote repository (GitHub App or PAT) and security-review it."""
+    import asyncio
+
+    from .orchestrator import scan_repo
+
+    owner, name = _split_full_name(full_name)
+    cfg = _run_config(
+        output_dir, 1, model, max_turns, max_cost_usd,
+        False, False, 0, keep_clones, False, None,
+        db_url=_resolve_db_url(db_url), provider=provider,
+    )
+    asyncio.run(scan_repo(cfg, owner, name))
 
 
 @app.command()

@@ -93,3 +93,31 @@ async def test_run_scan_targets_only_skips_enumeration(tmp_path, monkeypatch):
 
     assert fake_app.iter_called is False
     assert processed == ["octo/demo"]
+
+
+async def test_scan_repo_processes_single_repo_and_writes_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=None, pat=None))
+
+    calls = []
+
+    async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
+        calls.append(repo.full_name)
+        store.record_result(
+            repo.owner, repo.name,
+            critical=1, high=0, total=1,
+            duration_s=1.0, cost_usd=0.01, reviewed_at="now",
+        )
+
+    monkeypatch.setattr(orch, "_process_repo", fake_process_repo)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3")
+
+    await orch.scan_repo(cfg, "octo", "demo")
+
+    assert calls == ["octo/demo"]
+    assert (tmp_path / "summary.csv").exists()
+
+    store = StateStore(cfg.state_target)
+    record = store.get("octo", "demo")
+    assert record is not None
+    assert record.critical_count == 1

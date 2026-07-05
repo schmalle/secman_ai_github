@@ -220,3 +220,19 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
         f"({res.total_findings} total) — ${res.cost_usd:.3f}, {res.num_turns} turns"
     )
     typer.echo(f"  CSV: {csv_path}")
+
+
+async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
+    """Clone, review, and record one remote repo by name (no enumeration)."""
+    auth = build_auth()
+    store = StateStore(cfg.state_target)
+    provider_env = _resolve_provider_env(cfg)
+
+    repo = await asyncio.to_thread(resolve_target, owner, name, auth)
+    store.upsert_pending(owner, name)
+
+    sem = asyncio.Semaphore(1)
+    await _process_repo(repo, auth, store, cfg, sem, provider_env)
+
+    summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
+    typer.echo(f"Done. summary={summary}")
