@@ -88,6 +88,14 @@ def _run_config(
 def run(
     org: str = typer.Option(None, help="Limit to a single org/owner login."),
     repos_file: Path = typer.Option(None, help="Allowlist file, one 'owner/repo' per line."),
+    targets_only: bool = typer.Option(
+        False,
+        "--targets-only",
+        help=(
+            "Skip GitHub App enumeration; scan only 'secscan repo add' targets "
+            "(and --repos-file, if given). --org has no effect in this mode."
+        ),
+    ),
     output_dir: Path = typer.Option(Path("output"), help="Where CSVs and state live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (mysql://user:pass@host:3306/db). Defaults to SECSCAN_DB_URL or local SQLite."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
@@ -112,7 +120,7 @@ def run(
         include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
         db_url=_resolve_db_url(db_url), provider=provider,
     )
-    asyncio.run(run_scan(cfg, org=org, repos_file=repos_file))
+    asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
 
 
 @app.command("list-repos")

@@ -141,12 +141,20 @@ async def _process_repo(
                 cleanup(path)
 
 
-async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | None = None) -> None:
+async def run_scan(
+    cfg: RunConfig,
+    org: str | None = None,
+    repos_file: Path | None = None,
+    targets_only: bool = False,
+) -> None:
     auth = build_auth()
     store = StateStore(cfg.state_target)
     provider_env = _resolve_provider_env(cfg)
 
-    if auth.app is not None:
+    if targets_only:
+        typer.echo("Targets-only mode: skipping GitHub App enumeration.")
+        repos: list[RepoInfo] = []
+    elif auth.app is not None:
         typer.echo("Enumerating reachable repositories…")
         repos: list[RepoInfo] = await asyncio.to_thread(
             lambda: list(auth.app.iter_repositories(org=org, filters=cfg.filters))
