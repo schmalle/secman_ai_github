@@ -70,6 +70,7 @@ async def _process_repo(
 
             csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
             write_findings_csv(csv_path, repo.full_name, res.high_critical)
+            store.replace_findings(owner, name, res.high_critical)
 
             if res.error and not res.findings:
                 store.record_failure(owner, name, res.error)
@@ -98,7 +99,7 @@ async def _process_repo(
 
 async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | None = None) -> None:
     client = GithubAppClient(GithubAppConfig.from_env())
-    store = StateStore(cfg.state_db)
+    store = StateStore(cfg.state_target)
 
     typer.echo("Enumerating reachable repositories…")
     repos: list[RepoInfo] = await asyncio.to_thread(
