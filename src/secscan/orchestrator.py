@@ -14,9 +14,11 @@ import typer
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .cloner import CloneError, cleanup, clone_repo
-from .config import GithubAppConfig, RunConfig
+from .config import RunConfig
 from .findings import write_findings_csv, write_summary_csv
-from .github_app import GithubAppClient, RepoInfo, redact_url
+from .github_app import RepoInfo, redact_url
+from .github_auth import AuthContext, build_auth, resolve_target
+from .providers import ProviderEnv, model_hint, resolve_provider
 from .reviewer import review_repo
 from .state import StateStore, Status
 
@@ -32,8 +34,8 @@ def _clone_root(cfg: RunConfig) -> Path:
 
 
 @retry(**_RETRY)
-async def _mint_token(client: GithubAppClient, installation_id: int) -> str:
-    return await asyncio.to_thread(client.installation_token, installation_id)
+async def _mint_token(auth: AuthContext, repo: RepoInfo) -> str:
+    return await asyncio.to_thread(auth.token_for, repo)
 
 
 @retry(retry=retry_if_exception_type(CloneError), **_RETRY)
@@ -48,14 +50,55 @@ def _load_allowlist(repos_file: Path | None) -> set[str] | None:
     return {ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")}
 
 
+def _merge_scope(
+    enumerated: list[RepoInfo],
+    allowlist: set[str] | None,
+    targets: list[tuple[str, str]],
+) -> tuple[list[RepoInfo], list[tuple[str, str]]]:
+    """Combine enumerated repos, the --repos-file allowlist, and DB targets.
+
+    Returns (in-scope enumerated repos, unresolved 'owner/name' pairs to look up).
+    Enumerated repos are filtered by the allowlist (if given). DB targets and
+    allowlist entries not found in the enumeration are returned for resolution.
+    Deduped by full_name; enumerated entries win (they carry an installation_id).
+    """
+    if allowlist is not None:
+        enumerated = [r for r in enumerated if r.full_name in allowlist]
+    seen = {r.full_name for r in enumerated}
+
+    wanted: list[tuple[str, str]] = list(targets)
+    if allowlist is not None:
+        wanted += [tuple(entry.split("/", 1)) for entry in sorted(allowlist) if "/" in entry]
+
+    unresolved: list[tuple[str, str]] = []
+    for owner, name in wanted:
+        full_name = f"{owner}/{name}"
+        if full_name in seen:
+            continue
+        seen.add(full_name)
+        unresolved.append((owner, name))
+    return enumerated, unresolved
+
+
+def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
+    provider_env = resolve_provider(cfg.provider)
+    if provider_env.name != "anthropic":
+        typer.echo(f"Reviews routed through {provider_env.name}.")
+    hint = model_hint(provider_env, cfg.model)
+    if hint:
+        typer.echo(hint)
+    return provider_env
+
+
 async def _process_repo(
-    repo: RepoInfo, client: GithubAppClient, store: StateStore, cfg: RunConfig, sem: asyncio.Semaphore
+    repo: RepoInfo, auth: AuthContext, store: StateStore, cfg: RunConfig,
+    sem: asyncio.Semaphore, provider_env: ProviderEnv,
 ) -> None:
     owner, name = repo.owner, repo.name
     async with sem:
         path: Path | None = None
         try:
-            token = await _mint_token(client, repo.installation_id)
+            token = await _mint_token(auth, repo)
             store.mark(owner, name, Status.CLONED)
             path = await _clone(repo, token, _clone_root(cfg))
 
@@ -66,10 +109,12 @@ async def _process_repo(
                 model=cfg.model,
                 max_turns=cfg.max_turns,
                 max_cost_usd=cfg.max_cost_usd,
+                extra_env=provider_env.env,
             )
 
             csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
             write_findings_csv(csv_path, repo.full_name, res.high_critical)
+            store.replace_findings(owner, name, res.high_critical)
 
             if res.error and not res.findings:
                 store.record_failure(owner, name, res.error)
@@ -97,17 +142,24 @@ async def _process_repo(
 
 
 async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | None = None) -> None:
-    client = GithubAppClient(GithubAppConfig.from_env())
-    store = StateStore(cfg.state_db)
+    auth = build_auth()
+    store = StateStore(cfg.state_target)
+    provider_env = _resolve_provider_env(cfg)
 
-    typer.echo("Enumerating reachable repositories…")
-    repos: list[RepoInfo] = await asyncio.to_thread(
-        lambda: list(client.iter_repositories(org=org, filters=cfg.filters))
-    )
+    if auth.app is not None:
+        typer.echo("Enumerating reachable repositories…")
+        repos: list[RepoInfo] = await asyncio.to_thread(
+            lambda: list(auth.app.iter_repositories(org=org, filters=cfg.filters))
+        )
+    else:
+        typer.echo("No GitHub App configured; scanning explicit targets only.")
+        repos = []
 
-    allowlist = _load_allowlist(repos_file)
-    if allowlist is not None:
-        repos = [r for r in repos if r.full_name in allowlist]
+    # Explicit targets (secscan repo add) and unmatched allowlist entries join the
+    # scope; they bypass Filters because they were added by hand.
+    repos, unresolved = _merge_scope(repos, _load_allowlist(repos_file), store.list_targets())
+    for owner, name in unresolved:
+        repos.append(await asyncio.to_thread(resolve_target, owner, name, auth))
 
     # Register all, then decide which to actually review (resume skips done).
     todo: list[RepoInfo] = []
@@ -123,7 +175,7 @@ async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | No
     typer.echo(f"{len(repos)} in scope, {len(todo)} to review (concurrency={cfg.concurrency}).")
 
     sem = asyncio.Semaphore(cfg.concurrency)
-    await asyncio.gather(*(_process_repo(r, client, store, cfg, sem) for r in todo))
+    await asyncio.gather(*(_process_repo(r, auth, store, cfg, sem, provider_env) for r in todo))
 
     summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
     records = store.all_records()
@@ -142,10 +194,12 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
         raise typer.BadParameter(f"not a directory: {path}")
     name = path.name
     full_name = f"local/{name}"
+    provider_env = _resolve_provider_env(cfg)
 
     typer.echo(f"Reviewing {full_name} …")
     res = await review_repo(
-        path, full_name, model=cfg.model, max_turns=cfg.max_turns, max_cost_usd=cfg.max_cost_usd
+        path, full_name, model=cfg.model, max_turns=cfg.max_turns,
+        max_cost_usd=cfg.max_cost_usd, extra_env=provider_env.env,
     )
 
     csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"

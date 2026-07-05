@@ -45,6 +45,20 @@ class GithubAppConfig:
 
 
 @dataclass
+class GithubPatConfig:
+    """GitHub personal access token (classic or fine-grained). Held in memory only."""
+
+    token: str
+
+    @classmethod
+    def from_env(cls) -> "GithubPatConfig":
+        token = _env("GITHUB_TOKEN")
+        if not token:
+            raise ConfigError("GITHUB_TOKEN is required for PAT auth")
+        return cls(token=token)
+
+
+@dataclass
 class Filters:
     include_archived: bool = False
     include_forks: bool = False
@@ -57,9 +71,11 @@ class RunConfig:
 
     output_dir: Path = Path("output")
     state_db: Path = Path("output/secscan.sqlite3")
+    db_url: str | None = None  # mysql://… selects MySQL/MariaDB; None uses state_db (SQLite)
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     model: str = "sonnet"
+    provider: str = "auto"  # anthropic | openrouter | auto (see providers.py)
     max_turns: int = 60
     max_cost_usd: float | None = None  # per-repo abort threshold; None = no cap
     keep_clones: bool = False
@@ -69,6 +85,10 @@ class RunConfig:
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.state_db = Path(self.state_db)
+
+    @property
+    def state_target(self) -> "str | Path":
+        return self.db_url or self.state_db
 
 
 class ConfigError(Exception):

@@ -1,3 +1,4 @@
+from secscan.findings import Finding
 from secscan.state import RepoRecord, StateStore, Status, _dialect_for, _MYSQL_DIALECT, _SQLITE_DIALECT
 
 
@@ -82,6 +83,69 @@ def test_persistence_across_instances(tmp_path):
     db = tmp_path / "s.sqlite3"
     StateStore(db).upsert_pending("octo", "repo")
     assert StateStore(db).get("octo", "repo") is not None
+
+
+def _f(severity, title):
+    return Finding(severity=severity, title=title, description="d")
+
+
+def test_replace_findings_round_trip(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_findings("octo", "repo", [_f("critical", "sqli"), _f("high", "xss")])
+    rows = store.get_findings("octo", "repo")
+    assert {r["title"] for r in rows} == {"sqli", "xss"}
+    assert {r["severity"] for r in rows} == {"critical", "high"}
+
+
+def test_replace_findings_replaces_not_appends(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_findings("octo", "repo", [_f("high", "first")])
+    store.replace_findings("octo", "repo", [_f("critical", "second")])
+    rows = store.get_findings("octo", "repo")
+    assert [r["title"] for r in rows] == ["second"]
+
+
+def test_replace_findings_empty_clears(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_findings("octo", "repo", [_f("high", "first")])
+    store.replace_findings("octo", "repo", [])
+    assert store.get_findings("octo", "repo") == []
+
+
+def test_replace_findings_scoped_to_repo(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_findings("octo", "one", [_f("high", "keep")])
+    store.replace_findings("octo", "two", [_f("critical", "other")])
+    store.replace_findings("octo", "two", [])
+    assert [r["title"] for r in store.get_findings("octo", "one")] == ["keep"]
+
+
+def test_add_target_round_trip(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    assert store.add_target("octo", "repo", "2026-07-01T00:00:00+00:00") is True
+    assert store.list_targets() == [("octo", "repo")]
+
+
+def test_add_target_idempotent_returns_false_second_time(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    assert store.add_target("octo", "repo") is True
+    assert store.add_target("octo", "repo") is False
+    assert store.list_targets() == [("octo", "repo")]
+
+
+def test_remove_target_true_then_false(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.add_target("octo", "repo")
+    assert store.remove_target("octo", "repo") is True
+    assert store.remove_target("octo", "repo") is False
+    assert store.list_targets() == []
+
+
+def test_list_targets_sorted(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.add_target("b", "two")
+    store.add_target("a", "one")
+    assert store.list_targets() == [("a", "one"), ("b", "two")]
 
 
 def test_repo_record_is_dataclass_usable_for_summary():

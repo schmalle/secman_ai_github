@@ -1,10 +1,11 @@
-"""Resumable state manifest backed by SQLite or MySQL.
+"""Resumable state manifest backed by SQLite or MySQL/MariaDB.
 
 One row per repository in `repos`, keyed by (owner, repo). Lets long multi-repo runs
 be interrupted and resumed, and lets `secscan report` rebuild summary.csv afterwards.
 
-The backend is chosen from the target passed to `StateStore`: a `mysql://…` URL selects
-MySQL (via mysqlclient); anything else is a SQLite file path (the default).
+The backend is chosen from the target passed to `StateStore`: a `mysql://…` (or
+`mariadb://…`) URL selects MySQL/MariaDB (via mysqlclient, the `mysql` extra);
+anything else is a SQLite file path (the default).
 """
 
 from __future__ import annotations
@@ -14,6 +15,10 @@ import urllib.parse
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from .findings import Finding
 
 
 class Status(str, Enum):
@@ -78,6 +83,58 @@ CREATE TABLE IF NOT EXISTS repos (
 """
 
 
+_FINDINGS_SQLITE = """
+CREATE TABLE IF NOT EXISTS findings (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner          TEXT NOT NULL,
+    repo           TEXT NOT NULL,
+    severity       TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    category       TEXT NOT NULL DEFAULT '',
+    file_path      TEXT NOT NULL DEFAULT '',
+    line_range     TEXT NOT NULL DEFAULT '',
+    confidence     TEXT NOT NULL DEFAULT '',
+    description    TEXT NOT NULL DEFAULT '',
+    recommendation TEXT NOT NULL DEFAULT ''
+);
+"""
+
+_FINDINGS_MYSQL = """
+CREATE TABLE IF NOT EXISTS findings (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    owner          VARCHAR(255) NOT NULL,
+    repo           VARCHAR(255) NOT NULL,
+    severity       VARCHAR(32) NOT NULL,
+    title          TEXT NOT NULL,
+    category       VARCHAR(255) NOT NULL DEFAULT '',
+    file_path      TEXT NOT NULL,
+    line_range     VARCHAR(255) NOT NULL DEFAULT '',
+    confidence     VARCHAR(32) NOT NULL DEFAULT '',
+    description    TEXT NOT NULL,
+    recommendation TEXT NOT NULL
+);
+"""
+
+
+_TARGETS_SQLITE = """
+CREATE TABLE IF NOT EXISTS targets (
+    owner    TEXT NOT NULL,
+    repo     TEXT NOT NULL,
+    added_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo)
+);
+"""
+
+_TARGETS_MYSQL = """
+CREATE TABLE IF NOT EXISTS targets (
+    owner    VARCHAR(255) NOT NULL,
+    repo     VARCHAR(255) NOT NULL,
+    added_at VARCHAR(64) NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo)
+);
+"""
+
+
 @dataclass(frozen=True)
 class _Dialect:
     placeholder: str
@@ -88,18 +145,18 @@ class _Dialect:
 _SQLITE_DIALECT = _Dialect(
     placeholder="?",
     insert_ignore="INSERT OR IGNORE INTO",
-    schema=(_REPOS_SQLITE,),
+    schema=(_REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE),
 )
 
 _MYSQL_DIALECT = _Dialect(
     placeholder="%s",
     insert_ignore="INSERT IGNORE INTO",
-    schema=(_REPOS_MYSQL,),
+    schema=(_REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL),
 )
 
 
 def _is_mysql(target: str | Path) -> bool:
-    return isinstance(target, str) and target.startswith("mysql://")
+    return isinstance(target, str) and target.startswith(("mysql://", "mariadb://"))
 
 
 def _dialect_for(target: str | Path) -> _Dialect:
@@ -114,8 +171,15 @@ def _connect_sqlite(path: Path):
 
 
 def _connect_mysql(url: str):
-    import MySQLdb
-    from MySQLdb.cursors import DictCursor
+    try:
+        import MySQLdb
+        from MySQLdb.cursors import DictCursor
+    except ImportError as exc:
+        from .config import ConfigError
+
+        raise ConfigError(
+            "MySQL/MariaDB backend requires the 'mysql' extra: uv sync --extra mysql"
+        ) from exc
 
     p = urllib.parse.urlparse(url)
     return MySQLdb.connect(
@@ -206,6 +270,60 @@ class StateStore:
 
     def record_failure(self, owner: str, repo: str, error: str) -> None:
         self.mark(owner, repo, Status.FAILED, error=error)
+
+    _FINDING_COLS = (
+        "owner", "repo", "severity", "title", "category",
+        "file_path", "line_range", "confidence", "description", "recommendation",
+    )
+
+    def replace_findings(self, owner: str, repo: str, findings: "Iterable[Finding]") -> None:
+        """Replace all stored findings for a repo (delete-then-insert), one transaction."""
+        cur = self._conn.cursor()
+        cur.execute(
+            self._ph("DELETE FROM findings WHERE owner = ? AND repo = ?"), (owner, repo)
+        )
+        rows = [
+            (
+                owner, repo, f.severity.value, f.title, f.category,
+                f.file_path, f.line_range, f.confidence, f.description, f.recommendation,
+            )
+            for f in findings
+        ]
+        if rows:
+            cols = ", ".join(self._FINDING_COLS)
+            marks = ", ".join("?" for _ in self._FINDING_COLS)
+            cur.executemany(
+                self._ph(f"INSERT INTO findings ({cols}) VALUES ({marks})"), rows
+            )
+        self._conn.commit()
+
+    def get_findings(self, owner: str, repo: str) -> list[dict]:
+        cur = self._exec(
+            "SELECT * FROM findings WHERE owner = ? AND repo = ? ORDER BY id",
+            (owner, repo),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    # -- scan targets (explicitly-added repos) ------------------------------------
+
+    def add_target(self, owner: str, repo: str, added_at: str = "") -> bool:
+        """Register a repo to scan. Returns True if newly added, False if known."""
+        cur = self._exec(
+            f"{self._d.insert_ignore} targets (owner, repo, added_at) VALUES (?, ?, ?)",
+            (owner, repo, added_at),
+        )
+        return cur.rowcount > 0
+
+    def remove_target(self, owner: str, repo: str) -> bool:
+        """Unregister a repo. Returns True if a row was deleted."""
+        cur = self._exec(
+            "DELETE FROM targets WHERE owner = ? AND repo = ?", (owner, repo)
+        )
+        return cur.rowcount > 0
+
+    def list_targets(self) -> list[tuple[str, str]]:
+        cur = self._exec("SELECT owner, repo FROM targets ORDER BY owner, repo")
+        return [(r["owner"], r["repo"]) for r in cur.fetchall()]
 
     # -- reads ------------------------------------------------------------------
 

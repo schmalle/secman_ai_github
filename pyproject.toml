@@ -12,6 +12,9 @@ dependencies = [
     "tenacity>=8.2",
 ]
 
+[project.optional-dependencies]
+mysql = ["mysqlclient>=2.2"]
+
 [project.scripts]
 secscan = "secscan.cli:app"
 

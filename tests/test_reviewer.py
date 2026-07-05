@@ -28,8 +28,10 @@ class FakeResult:
         self.structured_output = structured_output
 
 
-def _patch(monkeypatch, messages):
+def _patch(monkeypatch, messages, captured=None):
     async def fake_query(*, prompt, options):
+        if captured is not None:
+            captured["options"] = options
         for m in messages:
             yield m
 
@@ -79,3 +81,20 @@ async def test_review_records_agent_error(tmp_path, monkeypatch):
     res = await review_repo(tmp_path, "octo/repo")
     assert "boom" in res.error
     assert res.total_findings == 0
+
+
+async def test_review_passes_env_overrides_to_options(tmp_path, monkeypatch):
+    # ClaudeAgentOptions is constructed for real here, so this also verifies the
+    # installed SDK accepts an `env` field.
+    captured = {}
+    _patch(monkeypatch, [FakeResult(result="", cost=0.0, turns=1)], captured)
+    extra = {"ANTHROPIC_BASE_URL": "https://openrouter.ai/api", "ANTHROPIC_AUTH_TOKEN": "sk-or-x"}
+    await review_repo(tmp_path, "octo/repo", extra_env=extra)
+    assert captured["options"].env == extra
+
+
+async def test_review_omits_env_when_no_overrides(tmp_path, monkeypatch):
+    captured = {}
+    _patch(monkeypatch, [FakeResult(result="", cost=0.0, turns=1)], captured)
+    await review_repo(tmp_path, "octo/repo")
+    assert not captured["options"].env  # unset/empty: Anthropic path untouched
