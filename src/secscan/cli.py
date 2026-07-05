@@ -180,7 +180,8 @@ def scan(
     max_cost_usd: float = typer.Option(None, help="Cost abort threshold (USD)."),
     keep_clones: bool = typer.Option(False, help="Keep the clone instead of deleting it."),
 ) -> None:
-    """Clone one remote repository (GitHub App or PAT) and security-review it."""
+    """Clone one remote repository and security-review it (requires a PAT — single-repo
+    scans don't enumerate App installations, so App-only credentials can't clone here)."""
     import asyncio
 
     from .orchestrator import scan_repo
