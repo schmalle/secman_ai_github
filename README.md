@@ -65,9 +65,11 @@ uv run secscan list-repos                 # preview what would be scanned
 uv run secscan repo add octo/webapp       # add an explicit scan target (stored in DB)
 uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
+uv run secscan scan octo/webapp           # clone + review one remote repo on demand
 uv run secscan review ./some/local/repo   # review one local dir (no GitHub)
 uv run secscan run --limit 1              # full pipeline, one repo (smoke test)
 uv run secscan run --org my-org           # scope to one org
+uv run secscan run --targets-only         # only scan 'repo add' targets (skip App enumeration)
 uv run secscan run                        # all reachable repos + explicit targets
 uv run secscan run --db-url mysql://user:pass@host:3306/secscan   # MySQL/MariaDB state
 uv run secscan report                     # rebuild summary.csv from state
@@ -76,7 +78,7 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
 --model --provider --max-turns --max-cost-usd --output-dir --db-url --keep-clones
---no-resume --limit`.
+--no-resume --limit --targets-only`.
 
 ## Authentication: GitHub App vs PAT
 
@@ -100,6 +102,13 @@ the size/archive/fork filters (they were added by hand) and are deduplicated aga
 enumeration. `repo list` and `repo remove` manage the set; targets follow the
 selected backend (`--db-url` / `SECSCAN_DB_URL`), so a shared MySQL database gives a
 shared target list.
+
+To scan only the registered targets — without enumerating the whole GitHub App —
+use `secscan run --targets-only` (a `--repos-file` allowlist still applies;
+`--org` does not, since it only filters App enumeration). To scan one specific
+remote repo on demand without registering it as a target, use
+`secscan scan owner/name`; it clones, reviews, and records the result the same way
+`run` does for a single repo, but doesn't add it to the target list.
 
 ## MySQL / MariaDB backend
 
