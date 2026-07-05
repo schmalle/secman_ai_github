@@ -98,13 +98,19 @@ def list_repos(
     max_size_mb: int = typer.Option(500),
 ) -> None:
     """Print the repositories that would be scanned (no cloning, no review)."""
-    from .config import GithubAppConfig
-    from .github_app import GithubAppClient
+    from .github_auth import build_auth
 
     filters = Filters(include_archived=include_archived, include_forks=include_forks, max_size_mb=max_size_mb)
-    client = GithubAppClient(GithubAppConfig.from_env())
-    for repo in client.iter_repositories(org=org, filters=filters):
-        typer.echo(f"{repo.full_name}\t{repo.size_kb} KB")
+    auth = build_auth()
+    seen: set[str] = set()
+    for client in (auth.app, auth.pat):
+        if client is None:
+            continue
+        for repo in client.iter_repositories(org=org, filters=filters):
+            if repo.full_name in seen:
+                continue  # App entry wins; PAT duplicates are dropped
+            seen.add(repo.full_name)
+            typer.echo(f"{repo.full_name}\t{repo.size_kb} KB")
 
 
 @app.command()

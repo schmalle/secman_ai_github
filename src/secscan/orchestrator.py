@@ -14,9 +14,10 @@ import typer
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .cloner import CloneError, cleanup, clone_repo
-from .config import GithubAppConfig, RunConfig
+from .config import RunConfig
 from .findings import write_findings_csv, write_summary_csv
-from .github_app import GithubAppClient, RepoInfo, redact_url
+from .github_app import RepoInfo, redact_url
+from .github_auth import AuthContext, build_auth
 from .reviewer import review_repo
 from .state import StateStore, Status
 
@@ -32,8 +33,8 @@ def _clone_root(cfg: RunConfig) -> Path:
 
 
 @retry(**_RETRY)
-async def _mint_token(client: GithubAppClient, installation_id: int) -> str:
-    return await asyncio.to_thread(client.installation_token, installation_id)
+async def _mint_token(auth: AuthContext, repo: RepoInfo) -> str:
+    return await asyncio.to_thread(auth.token_for, repo)
 
 
 @retry(retry=retry_if_exception_type(CloneError), **_RETRY)
@@ -49,13 +50,13 @@ def _load_allowlist(repos_file: Path | None) -> set[str] | None:
 
 
 async def _process_repo(
-    repo: RepoInfo, client: GithubAppClient, store: StateStore, cfg: RunConfig, sem: asyncio.Semaphore
+    repo: RepoInfo, auth: AuthContext, store: StateStore, cfg: RunConfig, sem: asyncio.Semaphore
 ) -> None:
     owner, name = repo.owner, repo.name
     async with sem:
         path: Path | None = None
         try:
-            token = await _mint_token(client, repo.installation_id)
+            token = await _mint_token(auth, repo)
             store.mark(owner, name, Status.CLONED)
             path = await _clone(repo, token, _clone_root(cfg))
 
@@ -98,13 +99,17 @@ async def _process_repo(
 
 
 async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | None = None) -> None:
-    client = GithubAppClient(GithubAppConfig.from_env())
+    auth = build_auth()
     store = StateStore(cfg.state_target)
 
-    typer.echo("Enumerating reachable repositories…")
-    repos: list[RepoInfo] = await asyncio.to_thread(
-        lambda: list(client.iter_repositories(org=org, filters=cfg.filters))
-    )
+    if auth.app is not None:
+        typer.echo("Enumerating reachable repositories…")
+        repos: list[RepoInfo] = await asyncio.to_thread(
+            lambda: list(auth.app.iter_repositories(org=org, filters=cfg.filters))
+        )
+    else:
+        typer.echo("No GitHub App configured; scanning explicit targets only.")
+        repos = []
 
     allowlist = _load_allowlist(repos_file)
     if allowlist is not None:
@@ -124,7 +129,7 @@ async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | No
     typer.echo(f"{len(repos)} in scope, {len(todo)} to review (concurrency={cfg.concurrency}).")
 
     sem = asyncio.Semaphore(cfg.concurrency)
-    await asyncio.gather(*(_process_repo(r, client, store, cfg, sem) for r in todo))
+    await asyncio.gather(*(_process_repo(r, auth, store, cfg, sem) for r in todo))
 
     summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
     records = store.all_records()

@@ -86,6 +86,10 @@ class GithubAppClient:
         """Mint a fresh ~1h installation access token (used for cloning)."""
         return self.integration.get_access_token(installation_id).token
 
+    def token_for(self, repo: RepoInfo) -> str:
+        """Token that can clone this repo (same interface as GithubPatClient)."""
+        return self.installation_token(repo.installation_id)
+
     def _iter_raw_repos(self) -> Iterator[RepoInfo]:
         """Yield every repository reachable across all installations (unfiltered)."""
         for installation in self.integration.get_installations():

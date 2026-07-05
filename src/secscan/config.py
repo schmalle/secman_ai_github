@@ -45,6 +45,20 @@ class GithubAppConfig:
 
 
 @dataclass
+class GithubPatConfig:
+    """GitHub personal access token (classic or fine-grained). Held in memory only."""
+
+    token: str
+
+    @classmethod
+    def from_env(cls) -> "GithubPatConfig":
+        token = _env("GITHUB_TOKEN")
+        if not token:
+            raise ConfigError("GITHUB_TOKEN is required for PAT auth")
+        return cls(token=token)
+
+
+@dataclass
 class Filters:
     include_archived: bool = False
     include_forks: bool = False
