@@ -1,0 +1,53 @@
+import pytest
+
+from secscan.config import ConfigError
+from secscan.providers import (
+    OPENROUTER_BASE_URL,
+    ProviderEnv,
+    model_hint,
+    resolve_provider,
+)
+
+
+def test_auto_is_anthropic_without_key(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    p = resolve_provider("auto")
+    assert p.name == "anthropic"
+    assert p.env == {}
+
+
+def test_auto_is_openrouter_with_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-abc")
+    p = resolve_provider("auto")
+    assert p.name == "openrouter"
+    assert p.env["ANTHROPIC_BASE_URL"] == OPENROUTER_BASE_URL
+    assert p.env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-abc"
+    assert p.env["ANTHROPIC_API_KEY"] == ""  # inherited Anthropic key neutralized
+
+
+def test_forced_openrouter_without_key_raises(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(ConfigError):
+        resolve_provider("openrouter")
+
+
+def test_forced_anthropic_ignores_openrouter_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-abc")
+    p = resolve_provider("anthropic")
+    assert p.name == "anthropic"
+    assert p.env == {}
+
+
+def test_unknown_provider_raises():
+    with pytest.raises(ConfigError):
+        resolve_provider("gemini")
+
+
+def test_model_hint_for_openrouter_alias():
+    p = ProviderEnv(name="openrouter", env={})
+    assert "slug" in model_hint(p, "sonnet")
+
+
+def test_model_hint_silent_for_slug_and_anthropic():
+    assert model_hint(ProviderEnv(name="openrouter", env={}), "anthropic/claude-sonnet-4.5") is None
+    assert model_hint(ProviderEnv(name="anthropic"), "sonnet") is None

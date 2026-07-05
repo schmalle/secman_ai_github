@@ -61,6 +61,7 @@ def _run_config(
     resume: bool,
     limit: int | None,
     db_url: str | None = None,
+    provider: str = "auto",
 ) -> RunConfig:
     return RunConfig(
         output_dir=output_dir,
@@ -73,6 +74,7 @@ def _run_config(
         ),
         concurrency=concurrency,
         model=model,
+        provider=provider,
         max_turns=max_turns,
         max_cost_usd=max_cost_usd,
         keep_clones=keep_clones,
@@ -88,7 +90,8 @@ def run(
     output_dir: Path = typer.Option(Path("output"), help="Where CSVs and state live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (mysql://user:pass@host:3306/db). Defaults to SECSCAN_DB_URL or local SQLite."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
-    model: str = typer.Option("sonnet", help="Claude model for reviews."),
+    model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
+    provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
     max_turns: int = typer.Option(60, help="Max agent turns per repo review."),
     max_cost_usd: float = typer.Option(None, help="Per-repo cost abort threshold (USD)."),
     include_archived: bool = typer.Option(False, help="Include archived repos."),
@@ -106,7 +109,7 @@ def run(
     cfg = _run_config(
         output_dir, concurrency, model, max_turns, max_cost_usd,
         include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
-        db_url=_resolve_db_url(db_url),
+        db_url=_resolve_db_url(db_url), provider=provider,
     )
     asyncio.run(run_scan(cfg, org=org, repos_file=repos_file))
 
@@ -139,6 +142,7 @@ def review(
     path: Path = typer.Argument(..., help="Local repo directory to review."),
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV is written."),
     model: str = typer.Option("sonnet"),
+    provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
     max_turns: int = typer.Option(60),
     max_cost_usd: float = typer.Option(None),
 ) -> None:
@@ -150,6 +154,7 @@ def review(
     cfg = _run_config(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, True, True, None,
+        provider=provider,
     )
     asyncio.run(review_local(cfg, path))
 

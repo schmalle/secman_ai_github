@@ -41,7 +41,13 @@ class ReviewResult:
     error: str = ""
 
 
-def _build_options(repo_dir: Path, model: str, max_turns: int, max_cost_usd: float | None) -> ClaudeAgentOptions:
+def _build_options(
+    repo_dir: Path,
+    model: str,
+    max_turns: int,
+    max_cost_usd: float | None,
+    extra_env: dict[str, str] | None = None,
+) -> ClaudeAgentOptions:
     kwargs = dict(
         cwd=str(repo_dir),
         system_prompt=SYSTEM_PROMPT,
@@ -54,6 +60,8 @@ def _build_options(repo_dir: Path, model: str, max_turns: int, max_cost_usd: flo
     )
     if max_cost_usd is not None:
         kwargs["max_budget_usd"] = max_cost_usd
+    if extra_env:
+        kwargs["env"] = extra_env  # e.g. OpenRouter base URL + auth token
     return ClaudeAgentOptions(**kwargs)
 
 
@@ -64,10 +72,11 @@ async def review_repo(
     model: str = "sonnet",
     max_turns: int = 60,
     max_cost_usd: float | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> ReviewResult:
     """Review one repository directory and return validated findings + run metadata."""
     result = ReviewResult(repo_full_name=repo_full_name)
-    options = _build_options(Path(repo_dir), model, max_turns, max_cost_usd)
+    options = _build_options(Path(repo_dir), model, max_turns, max_cost_usd, extra_env)
 
     text_chunks: list[str] = []
     final_text = ""

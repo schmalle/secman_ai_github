@@ -18,6 +18,7 @@ from .config import RunConfig
 from .findings import write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
 from .github_auth import AuthContext, build_auth, resolve_target
+from .providers import ProviderEnv, model_hint, resolve_provider
 from .reviewer import review_repo
 from .state import StateStore, Status
 
@@ -79,8 +80,19 @@ def _merge_scope(
     return enumerated, unresolved
 
 
+def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
+    provider_env = resolve_provider(cfg.provider)
+    if provider_env.name != "anthropic":
+        typer.echo(f"Reviews routed through {provider_env.name}.")
+    hint = model_hint(provider_env, cfg.model)
+    if hint:
+        typer.echo(hint)
+    return provider_env
+
+
 async def _process_repo(
-    repo: RepoInfo, auth: AuthContext, store: StateStore, cfg: RunConfig, sem: asyncio.Semaphore
+    repo: RepoInfo, auth: AuthContext, store: StateStore, cfg: RunConfig,
+    sem: asyncio.Semaphore, provider_env: ProviderEnv,
 ) -> None:
     owner, name = repo.owner, repo.name
     async with sem:
@@ -97,6 +109,7 @@ async def _process_repo(
                 model=cfg.model,
                 max_turns=cfg.max_turns,
                 max_cost_usd=cfg.max_cost_usd,
+                extra_env=provider_env.env,
             )
 
             csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
@@ -131,6 +144,7 @@ async def _process_repo(
 async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | None = None) -> None:
     auth = build_auth()
     store = StateStore(cfg.state_target)
+    provider_env = _resolve_provider_env(cfg)
 
     if auth.app is not None:
         typer.echo("Enumerating reachable repositories…")
@@ -161,7 +175,7 @@ async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | No
     typer.echo(f"{len(repos)} in scope, {len(todo)} to review (concurrency={cfg.concurrency}).")
 
     sem = asyncio.Semaphore(cfg.concurrency)
-    await asyncio.gather(*(_process_repo(r, auth, store, cfg, sem) for r in todo))
+    await asyncio.gather(*(_process_repo(r, auth, store, cfg, sem, provider_env) for r in todo))
 
     summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
     records = store.all_records()
@@ -180,10 +194,12 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
         raise typer.BadParameter(f"not a directory: {path}")
     name = path.name
     full_name = f"local/{name}"
+    provider_env = _resolve_provider_env(cfg)
 
     typer.echo(f"Reviewing {full_name} …")
     res = await review_repo(
-        path, full_name, model=cfg.model, max_turns=cfg.max_turns, max_cost_usd=cfg.max_cost_usd
+        path, full_name, model=cfg.model, max_turns=cfg.max_turns,
+        max_cost_usd=cfg.max_cost_usd, extra_env=provider_env.env,
     )
 
     csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"

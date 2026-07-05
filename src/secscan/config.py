@@ -75,6 +75,7 @@ class RunConfig:
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     model: str = "sonnet"
+    provider: str = "auto"  # anthropic | openrouter | auto (see providers.py)
     max_turns: int = 60
     max_cost_usd: float | None = None  # per-repo abort threshold; None = no cap
     keep_clones: bool = False
