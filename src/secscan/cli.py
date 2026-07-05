@@ -6,6 +6,7 @@ Commands:
   review      review a single local repo directory (dev/test loop, no GitHub)
   report      rebuild the aggregate summary.csv from the state DB
   repo        manage explicitly-added scan targets (add / list / remove)
+  send-report email the latest results as an HTML report (Gmail / O365 / custom SMTP)
 """
 
 from __future__ import annotations
@@ -171,6 +172,60 @@ def report(
     rows = store.all_records()
     out = write_summary_csv(output_dir / "summary.csv", rows)
     typer.echo(f"Wrote {out} ({len(rows)} repos)")
+
+
+@app.command("send-report")
+def send_report(
+    email_to: list[str] = typer.Option(..., "--email-to", help="Recipient address; repeat for multiple."),
+    email_provider: str = typer.Option("custom", help="gmail|o365|custom (presets for smtp.gmail.com / smtp.office365.com)."),
+    smtp_host: str = typer.Option(None, help="SMTP host (custom provider); defaults to SMTP_HOST."),
+    smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
+    subject: str = typer.Option(None, help="Subject; defaults to a findings summary."),
+    max_findings: int = typer.Option(50, help="Cap the findings included in the email."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+) -> None:
+    """Email the latest scan results as an HTML report (with a plain-text part)."""
+    from datetime import datetime, timezone
+
+    from .config import ConfigError
+    from .emailer import EmailConfig, build_message, send_email
+    from .report_html import (
+        build_report_html,
+        build_report_text,
+        default_subject,
+        severity_sort_key,
+    )
+
+    store = _open_store(output_dir, db_url)
+    records = store.all_records()
+
+    findings: list[dict] = []
+    for rec in records:
+        for row in store.get_findings(rec.owner, rec.repo):
+            row["repo_full_name"] = rec.full_name
+            findings.append(row)
+    findings.sort(key=severity_sort_key)
+    total_findings = len(findings)
+    findings = findings[:max_findings]
+    if total_findings > max_findings:
+        typer.echo(f"Including {max_findings} of {total_findings} findings (raise --max-findings for more).")
+
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    html = build_report_html(records, findings, generated_at)
+    text = build_report_text(records, findings, generated_at)
+
+    try:
+        cfg = EmailConfig.from_env(email_provider, host=smtp_host, port=smtp_port)
+        msg = build_message(cfg, email_to, subject or default_subject(records), html, text)
+        send_email(cfg, msg)
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"Sent report to {', '.join(email_to)} ({len(records)} repos, {len(findings)} findings)"
+    )
 
 
 _TARGET_DB_HELP = "MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."
