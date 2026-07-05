@@ -120,6 +120,34 @@ def test_replace_findings_scoped_to_repo(tmp_path):
     assert [r["title"] for r in store.get_findings("octo", "one")] == ["keep"]
 
 
+def test_add_target_round_trip(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    assert store.add_target("octo", "repo", "2026-07-01T00:00:00+00:00") is True
+    assert store.list_targets() == [("octo", "repo")]
+
+
+def test_add_target_idempotent_returns_false_second_time(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    assert store.add_target("octo", "repo") is True
+    assert store.add_target("octo", "repo") is False
+    assert store.list_targets() == [("octo", "repo")]
+
+
+def test_remove_target_true_then_false(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.add_target("octo", "repo")
+    assert store.remove_target("octo", "repo") is True
+    assert store.remove_target("octo", "repo") is False
+    assert store.list_targets() == []
+
+
+def test_list_targets_sorted(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.add_target("b", "two")
+    store.add_target("a", "one")
+    assert store.list_targets() == [("a", "one"), ("b", "two")]
+
+
 def test_repo_record_is_dataclass_usable_for_summary():
     import dataclasses
 

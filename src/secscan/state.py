@@ -116,6 +116,25 @@ CREATE TABLE IF NOT EXISTS findings (
 """
 
 
+_TARGETS_SQLITE = """
+CREATE TABLE IF NOT EXISTS targets (
+    owner    TEXT NOT NULL,
+    repo     TEXT NOT NULL,
+    added_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo)
+);
+"""
+
+_TARGETS_MYSQL = """
+CREATE TABLE IF NOT EXISTS targets (
+    owner    VARCHAR(255) NOT NULL,
+    repo     VARCHAR(255) NOT NULL,
+    added_at VARCHAR(64) NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo)
+);
+"""
+
+
 @dataclass(frozen=True)
 class _Dialect:
     placeholder: str
@@ -126,13 +145,13 @@ class _Dialect:
 _SQLITE_DIALECT = _Dialect(
     placeholder="?",
     insert_ignore="INSERT OR IGNORE INTO",
-    schema=(_REPOS_SQLITE, _FINDINGS_SQLITE),
+    schema=(_REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE),
 )
 
 _MYSQL_DIALECT = _Dialect(
     placeholder="%s",
     insert_ignore="INSERT IGNORE INTO",
-    schema=(_REPOS_MYSQL, _FINDINGS_MYSQL),
+    schema=(_REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL),
 )
 
 
@@ -284,6 +303,27 @@ class StateStore:
             (owner, repo),
         )
         return [dict(r) for r in cur.fetchall()]
+
+    # -- scan targets (explicitly-added repos) ------------------------------------
+
+    def add_target(self, owner: str, repo: str, added_at: str = "") -> bool:
+        """Register a repo to scan. Returns True if newly added, False if known."""
+        cur = self._exec(
+            f"{self._d.insert_ignore} targets (owner, repo, added_at) VALUES (?, ?, ?)",
+            (owner, repo, added_at),
+        )
+        return cur.rowcount > 0
+
+    def remove_target(self, owner: str, repo: str) -> bool:
+        """Unregister a repo. Returns True if a row was deleted."""
+        cur = self._exec(
+            "DELETE FROM targets WHERE owner = ? AND repo = ?", (owner, repo)
+        )
+        return cur.rowcount > 0
+
+    def list_targets(self) -> list[tuple[str, str]]:
+        cur = self._exec("SELECT owner, repo FROM targets ORDER BY owner, repo")
+        return [(r["owner"], r["repo"]) for r in cur.fetchall()]
 
     # -- reads ------------------------------------------------------------------
 

@@ -17,7 +17,7 @@ from .cloner import CloneError, cleanup, clone_repo
 from .config import RunConfig
 from .findings import write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
-from .github_auth import AuthContext, build_auth
+from .github_auth import AuthContext, build_auth, resolve_target
 from .reviewer import review_repo
 from .state import StateStore, Status
 
@@ -47,6 +47,36 @@ def _load_allowlist(repos_file: Path | None) -> set[str] | None:
         return None
     lines = Path(repos_file).read_text().splitlines()
     return {ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")}
+
+
+def _merge_scope(
+    enumerated: list[RepoInfo],
+    allowlist: set[str] | None,
+    targets: list[tuple[str, str]],
+) -> tuple[list[RepoInfo], list[tuple[str, str]]]:
+    """Combine enumerated repos, the --repos-file allowlist, and DB targets.
+
+    Returns (in-scope enumerated repos, unresolved 'owner/name' pairs to look up).
+    Enumerated repos are filtered by the allowlist (if given). DB targets and
+    allowlist entries not found in the enumeration are returned for resolution.
+    Deduped by full_name; enumerated entries win (they carry an installation_id).
+    """
+    if allowlist is not None:
+        enumerated = [r for r in enumerated if r.full_name in allowlist]
+    seen = {r.full_name for r in enumerated}
+
+    wanted: list[tuple[str, str]] = list(targets)
+    if allowlist is not None:
+        wanted += [tuple(entry.split("/", 1)) for entry in sorted(allowlist) if "/" in entry]
+
+    unresolved: list[tuple[str, str]] = []
+    for owner, name in wanted:
+        full_name = f"{owner}/{name}"
+        if full_name in seen:
+            continue
+        seen.add(full_name)
+        unresolved.append((owner, name))
+    return enumerated, unresolved
 
 
 async def _process_repo(
@@ -111,9 +141,11 @@ async def run_scan(cfg: RunConfig, org: str | None = None, repos_file: Path | No
         typer.echo("No GitHub App configured; scanning explicit targets only.")
         repos = []
 
-    allowlist = _load_allowlist(repos_file)
-    if allowlist is not None:
-        repos = [r for r in repos if r.full_name in allowlist]
+    # Explicit targets (secscan repo add) and unmatched allowlist entries join the
+    # scope; they bypass Filters because they were added by hand.
+    repos, unresolved = _merge_scope(repos, _load_allowlist(repos_file), store.list_targets())
+    for owner, name in unresolved:
+        repos.append(await asyncio.to_thread(resolve_target, owner, name, auth))
 
     # Register all, then decide which to actually review (resume skips done).
     todo: list[RepoInfo] = []

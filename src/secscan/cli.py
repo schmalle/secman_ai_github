@@ -5,6 +5,7 @@ Commands:
   list-repos  enumerate + filter only (no review) — show what would be scanned
   review      review a single local repo directory (dev/test loop, no GitHub)
   report      rebuild the aggregate summary.csv from the state DB
+  repo        manage explicitly-added scan targets (add / list / remove)
 """
 
 from __future__ import annotations
@@ -21,10 +22,30 @@ app = typer.Typer(
 )
 
 
+repo_app = typer.Typer(
+    add_completion=False,
+    help="Manage explicitly-added scan targets (stored in the state DB).",
+)
+app.add_typer(repo_app, name="repo")
+
+
 def _resolve_db_url(db_url: str | None) -> str | None:
     import os
 
     return db_url or os.environ.get("SECSCAN_DB_URL") or None
+
+
+def _split_full_name(value: str) -> tuple[str, str]:
+    parts = value.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise typer.BadParameter(f"expected 'owner/name', got {value!r}")
+    return parts[0], parts[1]
+
+
+def _open_store(output_dir: Path, db_url: str | None):
+    from .state import StateStore
+
+    return StateStore(_resolve_db_url(db_url) or (output_dir / "secscan.sqlite3"))
 
 
 def _run_config(
@@ -140,12 +161,59 @@ def report(
 ) -> None:
     """Rebuild summary.csv from the state database."""
     from .findings import write_summary_csv
-    from .state import StateStore
 
-    store = StateStore(_resolve_db_url(db_url) or (output_dir / "secscan.sqlite3"))
+    store = _open_store(output_dir, db_url)
     rows = store.all_records()
     out = write_summary_csv(output_dir / "summary.csv", rows)
     typer.echo(f"Wrote {out} ({len(rows)} repos)")
+
+
+_TARGET_DB_HELP = "MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."
+
+
+@repo_app.command("add")
+def repo_add(
+    full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help=_TARGET_DB_HELP),
+) -> None:
+    """Add a GitHub repository to the scan targets."""
+    from datetime import datetime, timezone
+
+    owner, name = _split_full_name(full_name)
+    store = _open_store(output_dir, db_url)
+    added = store.add_target(owner, name, datetime.now(timezone.utc).isoformat())
+    typer.echo(f"{'Added' if added else 'Already a target:'} {owner}/{name}")
+
+
+@repo_app.command("list")
+def repo_list(
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help=_TARGET_DB_HELP),
+) -> None:
+    """List the explicitly-added scan targets."""
+    store = _open_store(output_dir, db_url)
+    targets = store.list_targets()
+    for owner, name in targets:
+        typer.echo(f"{owner}/{name}")
+    if not targets:
+        typer.echo("(no targets — add one with: secscan repo add owner/name)")
+
+
+@repo_app.command("remove")
+def repo_remove(
+    full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help=_TARGET_DB_HELP),
+) -> None:
+    """Remove a GitHub repository from the scan targets."""
+    owner, name = _split_full_name(full_name)
+    store = _open_store(output_dir, db_url)
+    if store.remove_target(owner, name):
+        typer.echo(f"Removed {owner}/{name}")
+    else:
+        typer.echo(f"Not a target: {owner}/{name}", err=True)
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

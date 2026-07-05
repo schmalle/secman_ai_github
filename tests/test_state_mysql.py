@@ -37,6 +37,7 @@ def store():
     # clean slate for a deterministic test
     cur = s._conn.cursor()
     cur.execute("DELETE FROM findings")
+    cur.execute("DELETE FROM targets")
     cur.execute("DELETE FROM repos")
     s._conn.commit()
     yield s
@@ -66,3 +67,12 @@ def test_mysql_findings_replace(store):
     )
     rows = store.get_findings("octo", "repo")
     assert {r["title"] for r in rows} == {"sqli", "xss"}
+
+
+@pytestmark_live
+def test_mysql_targets_round_trip(store):
+    assert store.add_target("octo", "repo", "2026-07-01T00:00:00+00:00")
+    assert not store.add_target("octo", "repo")  # idempotent
+    assert store.list_targets() == [("octo", "repo")]
+    assert store.remove_target("octo", "repo")
+    assert store.list_targets() == []
