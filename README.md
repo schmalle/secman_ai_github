@@ -77,8 +77,12 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --output-dir --db-url --keep-clones
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --keep-clones
 --no-resume --limit --targets-only`.
+
+`--timeout` (default 900s) aborts a review if the agent produces no output for that
+long — a stall guard (e.g. a permission prompt with no interactive terminal to answer
+it), not a cap on total review duration. `--timeout 0` disables it.
 
 ## Authentication: GitHub App vs PAT
 
@@ -108,7 +112,9 @@ use `secscan run --targets-only` (a `--repos-file` allowlist still applies;
 `--org` does not, since it only filters App enumeration). To scan one specific
 remote repo on demand without registering it as a target, use
 `secscan scan owner/name`; it clones, reviews, and records the result the same way
-`run` does for a single repo, but doesn't add it to the target list.
+`run` does for a single repo, but doesn't add it to the target list. `scan` requires
+a PAT: a single-repo scan doesn't enumerate App installations, so an App-only
+credential has no installation token to clone with.
 
 ## MySQL / MariaDB backend
 

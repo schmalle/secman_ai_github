@@ -78,6 +78,7 @@ class RunConfig:
     provider: str = "auto"  # anthropic | openrouter | auto (see providers.py)
     max_turns: int = 60
     max_cost_usd: float | None = None  # per-repo abort threshold; None = no cap
+    timeout_s: float = 900.0  # abort if the agent stalls (no messages) this long; 0 disables
     keep_clones: bool = False
     resume: bool = True  # skip repos already marked done
     limit: int | None = None  # cap number of repos (smoke tests)

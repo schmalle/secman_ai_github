@@ -1,3 +1,5 @@
+import asyncio
+
 import secscan.orchestrator as orch
 from secscan.config import RunConfig
 from secscan.github_app import RepoInfo
@@ -73,6 +75,27 @@ class _FakeAuth:
         self.pat = pat
 
 
+def test_resolve_provider_env_upgrades_default_model_for_openrouter(monkeypatch, capsys):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-abc")
+    cfg = RunConfig(model="sonnet", provider="auto")
+
+    provider_env = orch._resolve_provider_env(cfg)
+
+    assert provider_env.name == "openrouter"
+    assert cfg.model == "anthropic/claude-sonnet-5"
+    assert "hint" not in capsys.readouterr().out
+
+
+def test_resolve_provider_env_leaves_anthropic_model_untouched(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = RunConfig(model="sonnet", provider="auto")
+
+    provider_env = orch._resolve_provider_env(cfg)
+
+    assert provider_env.name == "anthropic"
+    assert cfg.model == "sonnet"
+
+
 async def test_run_scan_targets_only_skips_enumeration(tmp_path, monkeypatch):
     fake_app = _FakeApp()
     monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=fake_app))
@@ -93,6 +116,36 @@ async def test_run_scan_targets_only_skips_enumeration(tmp_path, monkeypatch):
 
     assert fake_app.iter_called is False
     assert processed == ["octo/demo"]
+
+
+async def test_process_repo_forwards_timeout_to_review(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    captured = {}
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root):
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        captured["idle_timeout_s"] = idle_timeout_s
+        return ReviewResult(repo_full_name=full_name)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", timeout_s=42.0)
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
+
+    assert captured["idle_timeout_s"] == 42.0
 
 
 async def test_scan_repo_processes_single_repo_and_writes_summary(tmp_path, monkeypatch):

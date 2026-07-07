@@ -6,7 +6,9 @@ repository code is never executed and the host's user settings/CLAUDE.md do not 
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +26,12 @@ from .prompts import SYSTEM_PROMPT, task_prompt
 # Read-only tool allowlist. Everything else is denied (defense in depth + permission_mode).
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob"]
 DENIED_TOOLS = ["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"]
+
+# Default guard against a stalled agent (e.g. waiting on a permission prompt with
+# no interactive terminal to answer it) hanging the review forever. This bounds
+# the gap between messages, not total review duration, since reviews legitimately
+# vary widely in length.
+DEFAULT_IDLE_TIMEOUT_S = 900.0
 
 
 @dataclass
@@ -65,6 +73,21 @@ def _build_options(
     return ClaudeAgentOptions(**kwargs)
 
 
+async def _iter_with_idle_timeout(
+    messages: AsyncIterator, timeout_s: float
+) -> AsyncIterator:
+    """Re-yield messages, raising TimeoutError if none arrives within timeout_s.
+
+    Bounds the gap between messages rather than total stream duration.
+    """
+    it = messages.__aiter__()
+    while True:
+        try:
+            yield await asyncio.wait_for(it.__anext__(), timeout=timeout_s)
+        except StopAsyncIteration:
+            return
+
+
 async def review_repo(
     repo_dir: Path,
     repo_full_name: str,
@@ -73,6 +96,7 @@ async def review_repo(
     max_turns: int = 60,
     max_cost_usd: float | None = None,
     extra_env: dict[str, str] | None = None,
+    idle_timeout_s: float | None = DEFAULT_IDLE_TIMEOUT_S,
 ) -> ReviewResult:
     """Review one repository directory and return validated findings + run metadata."""
     result = ReviewResult(repo_full_name=repo_full_name)
@@ -83,8 +107,12 @@ async def review_repo(
     structured = None
     started = time.perf_counter()
 
+    messages = query(prompt=task_prompt(repo_full_name), options=options)
+    if idle_timeout_s:
+        messages = _iter_with_idle_timeout(messages, idle_timeout_s)
+
     try:
-        async for message in query(prompt=task_prompt(repo_full_name), options=options):
+        async for message in messages:
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
@@ -95,9 +123,13 @@ async def review_repo(
                 final_text = message.result or ""
                 structured = getattr(message, "structured_output", None)
                 if message.is_error:
-                    result.error = "; ".join(message.errors or []) or "agent reported error"
+                    result.error = "; ".join(message.errors or []) or final_text or "agent reported error"
+    except asyncio.TimeoutError:
+        if not result.error:
+            result.error = f"review stalled: no response from the agent for {idle_timeout_s:.0f}s"
     except Exception as exc:  # SDK / transport failure
-        result.error = f"{type(exc).__name__}: {exc}"
+        if not result.error:
+            result.error = f"{type(exc).__name__}: {exc}"
 
     result.duration_s = time.perf_counter() - started
     result.raw_text = final_text or "\n".join(text_chunks)

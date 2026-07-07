@@ -4,6 +4,8 @@ The Claude Agent SDK `query` is replaced with a fake async generator so these te
 are deterministic and never hit the network.
 """
 
+import asyncio
+
 import secscan.reviewer as reviewer
 from secscan.reviewer import review_repo
 
@@ -83,6 +85,42 @@ async def test_review_records_agent_error(tmp_path, monkeypatch):
     assert res.total_findings == 0
 
 
+async def test_review_uses_result_text_when_errors_list_is_empty(tmp_path, monkeypatch):
+    # e.g. an invalid --model: the CLI reports is_error=True with no `errors`
+    # entries, but a diagnostic `result` string. That's the useful message —
+    # don't fall back to the generic "agent reported error".
+    _patch(monkeypatch, [
+        FakeResult(
+            result="There's an issue with the selected model (z-ai/glm-5.2).",
+            cost=0.0, turns=1, is_error=True, errors=[],
+        ),
+    ])
+    res = await review_repo(tmp_path, "octo/repo")
+    assert "z-ai/glm-5.2" in res.error
+
+
+async def test_review_keeps_result_error_over_later_stream_exception(tmp_path, monkeypatch):
+    # The SDK replaces a post-error-result ProcessError with its own generic
+    # text (e.g. "Claude Code returned an error result: success"). Once the
+    # ResultMessage has already given us the real diagnostic, a later
+    # exception from the stream shouldn't clobber it.
+    async def fake_query(*, prompt, options):
+        yield FakeResult(
+            result="There's an issue with the selected model (z-ai/glm-5.2).",
+            cost=0.0, turns=1, is_error=True, errors=[],
+        )
+        raise RuntimeError("Claude Code returned an error result: success")
+
+    monkeypatch.setattr(reviewer, "AssistantMessage", FakeAssistant)
+    monkeypatch.setattr(reviewer, "ResultMessage", FakeResult)
+    monkeypatch.setattr(reviewer, "TextBlock", FakeText)
+    monkeypatch.setattr(reviewer, "query", fake_query)
+
+    res = await review_repo(tmp_path, "octo/repo")
+    assert "z-ai/glm-5.2" in res.error
+    assert "success" not in res.error
+
+
 async def test_review_passes_env_overrides_to_options(tmp_path, monkeypatch):
     # ClaudeAgentOptions is constructed for real here, so this also verifies the
     # installed SDK accepts an `env` field.
@@ -98,3 +136,27 @@ async def test_review_omits_env_when_no_overrides(tmp_path, monkeypatch):
     _patch(monkeypatch, [FakeResult(result="", cost=0.0, turns=1)], captured)
     await review_repo(tmp_path, "octo/repo")
     assert not captured["options"].env  # unset/empty: Anthropic path untouched
+
+
+async def test_review_times_out_when_agent_stalls(tmp_path, monkeypatch):
+    # e.g. the agent is waiting on a permission prompt with no interactive
+    # terminal to answer it: no more messages ever arrive.
+    async def fake_query(*, prompt, options):
+        await asyncio.sleep(10)
+        yield FakeResult(result="", cost=0.0, turns=1)  # pragma: no cover
+
+    monkeypatch.setattr(reviewer, "AssistantMessage", FakeAssistant)
+    monkeypatch.setattr(reviewer, "ResultMessage", FakeResult)
+    monkeypatch.setattr(reviewer, "TextBlock", FakeText)
+    monkeypatch.setattr(reviewer, "query", fake_query)
+
+    res = await review_repo(tmp_path, "octo/repo", idle_timeout_s=0.05)
+    assert "stalled" in res.error
+    assert "0" in res.error  # includes the timeout duration
+    assert res.total_findings == 0
+
+
+async def test_review_idle_timeout_disabled_by_zero(tmp_path, monkeypatch):
+    _patch(monkeypatch, [FakeResult(result="", cost=0.0, turns=1)])
+    res = await review_repo(tmp_path, "octo/repo", idle_timeout_s=0)
+    assert res.error == ""

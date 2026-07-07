@@ -18,7 +18,7 @@ from .config import RunConfig
 from .findings import write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
 from .github_auth import AuthContext, build_auth, resolve_target
-from .providers import ProviderEnv, model_hint, resolve_provider
+from .providers import ProviderEnv, model_hint, resolve_model, resolve_provider
 from .reviewer import review_repo
 from .state import StateStore, Status
 
@@ -84,6 +84,7 @@ def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
     provider_env = resolve_provider(cfg.provider)
     if provider_env.name != "anthropic":
         typer.echo(f"Reviews routed through {provider_env.name}.")
+    cfg.model = resolve_model(provider_env, cfg.model)
     hint = model_hint(provider_env, cfg.model)
     if hint:
         typer.echo(hint)
@@ -110,6 +111,7 @@ async def _process_repo(
                 max_turns=cfg.max_turns,
                 max_cost_usd=cfg.max_cost_usd,
                 extra_env=provider_env.env,
+                idle_timeout_s=cfg.timeout_s,
             )
 
             csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
@@ -208,6 +210,7 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
     res = await review_repo(
         path, full_name, model=cfg.model, max_turns=cfg.max_turns,
         max_cost_usd=cfg.max_cost_usd, extra_env=provider_env.env,
+        idle_timeout_s=cfg.timeout_s,
     )
 
     csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"

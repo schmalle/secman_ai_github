@@ -64,6 +64,7 @@ def _run_config(
     limit: int | None,
     db_url: str | None = None,
     provider: str = "auto",
+    timeout_s: float = 900.0,
 ) -> RunConfig:
     return RunConfig(
         output_dir=output_dir,
@@ -79,6 +80,7 @@ def _run_config(
         provider=provider,
         max_turns=max_turns,
         max_cost_usd=max_cost_usd,
+        timeout_s=timeout_s,
         keep_clones=keep_clones,
         resume=resume,
         limit=limit,
@@ -104,6 +106,9 @@ def run(
     provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
     max_turns: int = typer.Option(60, help="Max agent turns per repo review."),
     max_cost_usd: float = typer.Option(None, help="Per-repo cost abort threshold (USD)."),
+    timeout: float = typer.Option(
+        900.0, help="Abort a repo's review if the agent stalls (no output) this long, in seconds; 0 disables."
+    ),
     include_archived: bool = typer.Option(False, help="Include archived repos."),
     include_forks: bool = typer.Option(False, help="Include forked repos."),
     max_size_mb: int = typer.Option(500, help="Skip repos larger than this (MB); 0 disables."),
@@ -119,7 +124,7 @@ def run(
     cfg = _run_config(
         output_dir, concurrency, model, max_turns, max_cost_usd,
         include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
-        db_url=_resolve_db_url(db_url), provider=provider,
+        db_url=_resolve_db_url(db_url), provider=provider, timeout_s=timeout,
     )
     asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
 
@@ -155,6 +160,9 @@ def review(
     provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
     max_turns: int = typer.Option(60),
     max_cost_usd: float = typer.Option(None),
+    timeout: float = typer.Option(
+        900.0, help="Abort if the agent stalls (no output) this long, in seconds; 0 disables."
+    ),
 ) -> None:
     """Security-review a single local repository directory."""
     import asyncio
@@ -164,7 +172,7 @@ def review(
     cfg = _run_config(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, True, True, None,
-        provider=provider,
+        provider=provider, timeout_s=timeout,
     )
     asyncio.run(review_local(cfg, path))
 
@@ -178,6 +186,9 @@ def scan(
     provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
     max_turns: int = typer.Option(60, help="Max agent turns for the review."),
     max_cost_usd: float = typer.Option(None, help="Cost abort threshold (USD)."),
+    timeout: float = typer.Option(
+        900.0, help="Abort if the agent stalls (no output) this long, in seconds; 0 disables."
+    ),
     keep_clones: bool = typer.Option(False, help="Keep the clone instead of deleting it."),
 ) -> None:
     """Clone one remote repository and security-review it (requires a PAT — single-repo
@@ -190,7 +201,7 @@ def scan(
     cfg = _run_config(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, keep_clones, False, None,
-        db_url=_resolve_db_url(db_url), provider=provider,
+        db_url=_resolve_db_url(db_url), provider=provider, timeout_s=timeout,
     )
     asyncio.run(scan_repo(cfg, owner, name))
 

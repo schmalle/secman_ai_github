@@ -58,6 +58,21 @@ def resolve_provider(provider: str = "auto") -> ProviderEnv:
     )
 
 
+# The bare Anthropic aliases ("sonnet", "opus", ...) that the CLI understands
+# directly have no OpenRouter equivalent; map the one we default to so
+# `--model` left unset still resolves to a working model on either provider.
+_OPENROUTER_MODEL_ALIASES = {
+    "sonnet": "anthropic/claude-sonnet-5",
+}
+
+
+def resolve_model(provider_env: ProviderEnv, model: str) -> str:
+    """Map a bare Anthropic alias to its OpenRouter slug when routing through OpenRouter."""
+    if provider_env.name == "openrouter":
+        return _OPENROUTER_MODEL_ALIASES.get(model, model)
+    return model
+
+
 def model_hint(provider_env: ProviderEnv, model: str) -> str | None:
     """Non-fatal usability hint when the model name doesn't fit the provider."""
     if provider_env.name == "openrouter" and "/" not in model:

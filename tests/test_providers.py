@@ -5,6 +5,7 @@ from secscan.providers import (
     OPENROUTER_BASE_URL,
     ProviderEnv,
     model_hint,
+    resolve_model,
     resolve_provider,
 )
 
@@ -51,3 +52,20 @@ def test_model_hint_for_openrouter_alias():
 def test_model_hint_silent_for_slug_and_anthropic():
     assert model_hint(ProviderEnv(name="openrouter", env={}), "anthropic/claude-sonnet-4.5") is None
     assert model_hint(ProviderEnv(name="anthropic"), "sonnet") is None
+
+
+def test_resolve_model_maps_sonnet_alias_to_openrouter_slug():
+    # The default --model is the bare "sonnet" alias; OpenRouter has no such
+    # alias, so map it to the equivalent full slug (currently Sonnet 5).
+    p = ProviderEnv(name="openrouter", env={})
+    assert resolve_model(p, "sonnet") == "anthropic/claude-sonnet-5"
+
+
+def test_resolve_model_leaves_explicit_slug_untouched():
+    p = ProviderEnv(name="openrouter", env={})
+    assert resolve_model(p, "anthropic/claude-sonnet-4.5") == "anthropic/claude-sonnet-4.5"
+
+
+def test_resolve_model_leaves_anthropic_alias_untouched():
+    # "sonnet" already resolves to the latest Sonnet on direct Anthropic auth.
+    assert resolve_model(ProviderEnv(name="anthropic"), "sonnet") == "sonnet"
