@@ -7,12 +7,20 @@ the Claude Code subprocess at a different base URL with an OpenRouter key.
 
 Providers:
 - "anthropic": the default — the SDK uses ANTHROPIC_API_KEY (or a logged-in
-  Claude subscription) untouched.
+  Claude subscription) untouched. Note this only leaves inherited env alone; it
+  does not strip an inherited ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN pointing
+  elsewhere (e.g. left over from OpenRouter use in the same shell) — use
+  "usecc" for that.
 - "openrouter": requires OPENROUTER_API_KEY; model names must be OpenRouter slugs
   (e.g. "anthropic/claude-sonnet-4.5").
 - "auto": openrouter iff OPENROUTER_API_KEY is set, else anthropic. Setting the
   key is the opt-in; --provider anthropic forces Anthropic even when both keys
   are present.
+- "usecc": force the locally authenticated Claude Code session. Ignores
+  OPENROUTER_API_KEY and explicitly neutralizes any inherited
+  ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN, since the Claude
+  Code CLI treats any of those as "another auth source" and disables the
+  claude.ai-login-backed connectors otherwise.
 """
 
 from __future__ import annotations
@@ -23,7 +31,7 @@ from .config import ConfigError, _env
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 
-_PROVIDERS = ("anthropic", "openrouter", "auto")
+_PROVIDERS = ("anthropic", "openrouter", "auto", "usecc")
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,16 @@ def resolve_provider(provider: str = "auto") -> ProviderEnv:
     """Resolve the provider choice against the environment."""
     if provider not in _PROVIDERS:
         raise ConfigError(f"provider must be one of {', '.join(_PROVIDERS)}; got {provider!r}")
+
+    if provider == "usecc":
+        return ProviderEnv(
+            name="usecc",
+            env={
+                "ANTHROPIC_API_KEY": "",
+                "ANTHROPIC_BASE_URL": "",
+                "ANTHROPIC_AUTH_TOKEN": "",
+            },
+        )
 
     key = _env("OPENROUTER_API_KEY")
     if provider == "auto":

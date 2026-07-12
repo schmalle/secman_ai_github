@@ -27,7 +27,7 @@ treated as untrusted data (prompt-injection aware).
 - `git` on `PATH`.
 - Node + the Claude Code CLI installed and authenticated. The Claude Agent SDK shells
   out to it. Auth via `ANTHROPIC_API_KEY`, a logged-in Claude subscription, **or** an
-  `OPENROUTER_API_KEY` (see [Using OpenRouter](#using-openrouter)).
+  `OPENROUTER_API_KEY` (see [Choosing a provider](#choosing-a-provider---provider)).
 - GitHub credentials — one (or both) of:
   - A **GitHub App** installed on the target org(s)/repos with permissions
     **Contents: Read**, **Metadata: Read**. You need its App ID and a private key (`.pem`).
@@ -50,7 +50,7 @@ the environment only and never written to disk.
 | `GITHUB_APP_PRIVATE_KEY_PATH` | …path to the `.pem` file |
 | `GITHUB_TOKEN` | Personal access token — alternative or complement to the App |
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
-| `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set) |
+| `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
 | `SECSCAN_DB_URL` | `mysql://user:pass@host:3306/secscan` for state + findings + targets; unset = local SQLite |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | SMTP credentials for `send-report` |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP server for `--email-provider custom` (port defaults to 587) |
@@ -139,12 +139,22 @@ docker run --rm -e MARIADB_ROOT_PASSWORD=pw -e MARIADB_DATABASE=secscan_test -p 
 SECSCAN_TEST_MYSQL_URL=mysql://root:pw@127.0.0.1:3306/secscan_test uv run pytest tests/test_state_mysql.py -v
 ```
 
-## Using OpenRouter
+## Choosing a provider (`--provider`)
 
-The reviewer is always Claude Code; OpenRouter just becomes the API endpoint that
-bills the tokens (it exposes an Anthropic-compatible API). Set `OPENROUTER_API_KEY`
-and it is used automatically (`--provider auto` is the default); force a choice with
-`--provider anthropic` or `--provider openrouter`.
+The reviewer is always Claude Code (via the Claude Agent SDK); `--provider` only
+picks which API endpoint bills the tokens. Available on `run`, `scan`, and `review`.
+
+| `--provider` | Behavior |
+|---|---|
+| `auto` (default) | OpenRouter if `OPENROUTER_API_KEY` is set, else Anthropic. |
+| `anthropic` | Force direct Anthropic auth (`ANTHROPIC_API_KEY` or a logged-in Claude subscription), ignoring `OPENROUTER_API_KEY` even if set. Does **not** strip an already-exported `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` — use `usecc` if those need clearing too. |
+| `openrouter` | Force OpenRouter; fails with a config error if `OPENROUTER_API_KEY` isn't set. |
+| `usecc` | Force the **locally authenticated Claude Code session**. Ignores `OPENROUTER_API_KEY` and explicitly clears any inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, so a shell that still exports OpenRouter vars (or any other Anthropic auth override) can't hijack the review — Claude Code falls back to your `claude.ai` login. |
+
+### Using OpenRouter
+
+Set `OPENROUTER_API_KEY` and it is used automatically (`--provider auto` is the
+default); force it explicitly with `--provider openrouter`.
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-…
@@ -155,6 +165,21 @@ Note: with OpenRouter, `--model` takes an **OpenRouter slug** such as
 `anthropic/claude-sonnet-4.5` — aliases like `sonnet` only work against Anthropic
 directly. The Claude Code CLI still needs to be installed; only its
 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` are overridden for the review subprocess.
+
+### Forcing your local Claude Code login (`--provider usecc`)
+
+Use this when `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` is
+set somewhere in your environment (e.g. exported in a shell profile for other tools)
+and you want to guarantee the review runs against your own `claude.ai` subscription
+login instead — no key lookup, no OpenRouter, no risk of an inherited env var being
+treated as "another auth source" and disabling Claude Code's connectors.
+
+```bash
+uv run secscan scan --provider usecc --model sonnet octo/webapp
+```
+
+With `usecc`, `--model` takes bare Anthropic aliases (`sonnet`, `opus`, …), the same
+as plain `anthropic`.
 
 ## Email reports
 

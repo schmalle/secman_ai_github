@@ -44,6 +44,29 @@ def test_unknown_provider_raises():
         resolve_provider("gemini")
 
 
+def test_usecc_ignores_openrouter_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-abc")
+    p = resolve_provider("usecc")
+    assert p.name == "usecc"
+    assert p.env["ANTHROPIC_API_KEY"] == ""
+
+
+def test_usecc_neutralizes_inherited_anthropic_auth_env(monkeypatch):
+    # Simulates a shell that still exports OpenRouter-pointing vars from earlier
+    # use; "usecc" must strip them so the Claude Code subprocess falls back to
+    # the local claude.ai login instead of treating them as another auth source.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-abc")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", OPENROUTER_BASE_URL)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-or-abc")
+    p = resolve_provider("usecc")
+    assert p.name == "usecc"
+    assert p.env == {
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_BASE_URL": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+    }
+
+
 def test_model_hint_for_openrouter_alias():
     p = ProviderEnv(name="openrouter", env={})
     assert "slug" in model_hint(p, "sonnet")

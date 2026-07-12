@@ -103,7 +103,14 @@ def run(
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (mysql://user:pass@host:3306/db). Defaults to SECSCAN_DB_URL or local SQLite."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
-    provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
+    provider: str = typer.Option(
+        "auto",
+        help=(
+            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
+            "usecc: force the locally authenticated Claude Code session, ignoring "
+            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
+        ),
+    ),
     max_turns: int = typer.Option(60, help="Max agent turns per repo review."),
     max_cost_usd: float = typer.Option(None, help="Per-repo cost abort threshold (USD)."),
     timeout: float = typer.Option(
@@ -157,7 +164,14 @@ def review(
     path: Path = typer.Argument(..., help="Local repo directory to review."),
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV is written."),
     model: str = typer.Option("sonnet"),
-    provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
+    provider: str = typer.Option(
+        "auto",
+        help=(
+            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
+            "usecc: force the locally authenticated Claude Code session, ignoring "
+            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
+        ),
+    ),
     max_turns: int = typer.Option(60),
     max_cost_usd: float = typer.Option(None),
     timeout: float = typer.Option(
@@ -183,7 +197,14 @@ def scan(
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV and state live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
-    provider: str = typer.Option("auto", help="anthropic|openrouter|auto (auto: OpenRouter if OPENROUTER_API_KEY is set)."),
+    provider: str = typer.Option(
+        "auto",
+        help=(
+            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
+            "usecc: force the locally authenticated Claude Code session, ignoring "
+            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
+        ),
+    ),
     max_turns: int = typer.Option(60, help="Max agent turns for the review."),
     max_cost_usd: float = typer.Option(None, help="Cost abort threshold (USD)."),
     timeout: float = typer.Option(
