@@ -59,12 +59,14 @@ if [[ "$APP_PASSWORD" != "$APP_PASSWORD_CONFIRM" ]]; then
     exit 1
 fi
 
-ESCAPED_APP_PASSWORD="${APP_PASSWORD//\\/\\\\}"
-ESCAPED_APP_PASSWORD="${ESCAPED_APP_PASSWORD//\'/\\\'}"
+if [[ "$APP_PASSWORD" == *"'"* || "$APP_PASSWORD" == *'\'* ]]; then
+    echo "Error: app user password must not contain a single quote or backslash character." >&2
+    exit 1
+fi
 
 MYSQL_PWD="$ADMIN_PASSWORD" mysql --host="$HOST" --port="$PORT" --user="$ADMIN_USER" <<SQL
 CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4;
-CREATE USER IF NOT EXISTS '$APP_USER'@'%' IDENTIFIED BY '$ESCAPED_APP_PASSWORD';
+CREATE USER IF NOT EXISTS '$APP_USER'@'%' IDENTIFIED BY '$APP_PASSWORD';
 GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$APP_USER'@'%';
 FLUSH PRIVILEGES;
 SQL
