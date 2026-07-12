@@ -1,5 +1,48 @@
 from secscan.findings import Finding
-from secscan.state import RepoRecord, StateStore, Status, _dialect_for, _MYSQL_DIALECT, _SQLITE_DIALECT
+from secscan.state import (
+    RepoRecord, StateStore, Status, _dialect_for, _mysql_connect_kwargs,
+    _MYSQL_DIALECT, _SQLITE_DIALECT,
+)
+
+
+def test_mysql_connect_kwargs_from_url_only():
+    kw = _mysql_connect_kwargs("mysql://bob:secret@dbhost:3307/secscan")
+    assert kw == {
+        "host": "dbhost", "port": 3307, "user": "bob", "passwd": "secret",
+        "db": "secscan", "charset": "utf8mb4",
+    }
+
+
+def test_mysql_connect_kwargs_explicit_user_password_win_over_url():
+    kw = _mysql_connect_kwargs(
+        "mysql://urluser:urlpass@dbhost:3306/secscan",
+        user="flaguser", password="flagpass",
+    )
+    assert kw["user"] == "flaguser"
+    assert kw["passwd"] == "flagpass"
+
+
+def test_mysql_connect_kwargs_falls_back_to_url_when_none_given():
+    kw = _mysql_connect_kwargs("mysql://urluser:urlpass@dbhost:3306/secscan")
+    assert kw["user"] == "urluser"
+    assert kw["passwd"] == "urlpass"
+
+
+def test_mysql_connect_kwargs_no_ssl_by_default():
+    kw = _mysql_connect_kwargs("mysql://u:p@h:3306/db")
+    assert "ssl" not in kw
+
+
+def test_mysql_connect_kwargs_ssl_true_adds_ssl_mode_required():
+    kw = _mysql_connect_kwargs("mysql://u:p@h:3306/db", ssl=True)
+    assert kw["ssl"] == {"ssl_mode": "REQUIRED"}
+
+
+def test_store_init_accepts_mysql_credential_kwargs_for_sqlite_target_noop(tmp_path):
+    # SQLite targets must silently ignore db_user/db_password/db_ssl (no crash).
+    store = StateStore(tmp_path / "s.sqlite3", db_user="ignored", db_password="ignored", db_ssl=True)
+    store.upsert_pending("octo", "repo")
+    assert store.get("octo", "repo") is not None
 
 
 def test_dialect_for_selects_mysql_on_url():

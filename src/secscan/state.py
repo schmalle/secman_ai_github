@@ -170,7 +170,30 @@ def _connect_sqlite(path: Path):
     return conn
 
 
-def _connect_mysql(url: str):
+def _mysql_connect_kwargs(
+    url: str, *, user: str | None = None, password: str | None = None, ssl: bool = False
+) -> dict:
+    """Pure connection-argument builder — no MySQLdb import, so it's testable
+    without the C extension installed."""
+    p = urllib.parse.urlparse(url)
+    kwargs: dict = {
+        "host": p.hostname or "localhost",
+        "port": p.port or 3306,
+        "user": user or urllib.parse.unquote(p.username or ""),
+        "passwd": password or urllib.parse.unquote(p.password or ""),
+        "db": p.path.lstrip("/"),
+        "charset": "utf8mb4",
+    }
+    if ssl:
+        # Plain encrypt-or-not toggle: verifies against the system default CA
+        # trust store. No custom CA/cert/key support by design.
+        kwargs["ssl"] = {"ssl_mode": "REQUIRED"}
+    return kwargs
+
+
+def _connect_mysql(
+    url: str, *, user: str | None = None, password: str | None = None, ssl: bool = False
+):
     try:
         import MySQLdb
         from MySQLdb.cursors import DictCursor
@@ -181,23 +204,22 @@ def _connect_mysql(url: str):
             "MySQL/MariaDB backend requires the 'mysql' extra: uv sync --extra mysql"
         ) from exc
 
-    p = urllib.parse.urlparse(url)
-    return MySQLdb.connect(
-        host=p.hostname or "localhost",
-        port=p.port or 3306,
-        user=urllib.parse.unquote(p.username or ""),
-        passwd=urllib.parse.unquote(p.password or ""),
-        db=p.path.lstrip("/"),
-        charset="utf8mb4",
-        cursorclass=DictCursor,
-    )
+    kwargs = _mysql_connect_kwargs(url, user=user, password=password, ssl=ssl)
+    return MySQLdb.connect(cursorclass=DictCursor, **kwargs)
 
 
 class StateStore:
-    def __init__(self, target: str | Path):
+    def __init__(
+        self,
+        target: str | Path,
+        *,
+        db_user: str | None = None,
+        db_password: str | None = None,
+        db_ssl: bool = False,
+    ):
         self._d = _dialect_for(target)
         if _is_mysql(target):
-            self._conn = _connect_mysql(str(target))
+            self._conn = _connect_mysql(str(target), user=db_user, password=db_password, ssl=db_ssl)
         else:
             self._conn = _connect_sqlite(Path(target))
         cur = self._conn.cursor()
