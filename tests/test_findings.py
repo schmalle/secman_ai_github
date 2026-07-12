@@ -155,3 +155,21 @@ def test_fingerprint_is_hex_sha256():
     fp = fingerprint(f)
     assert len(fp) == 64
     int(fp, 16)  # raises ValueError if not hex
+
+
+def test_fingerprint_stable_across_description_changes():
+    a = Finding(severity="high", title="SQLi", description="one description", file_path="x.py")
+    b = Finding(severity="high", title="SQLi", description="a totally different description", file_path="x.py")
+    assert fingerprint(a) == fingerprint(b)
+
+
+def test_fingerprint_differs_on_category():
+    a = Finding(severity="high", title="SQLi", description="d", file_path="x.py", category="CWE-89")
+    b = Finding(severity="high", title="SQLi", description="d", file_path="x.py", category="CWE-79")
+    assert fingerprint(a) != fingerprint(b)
+
+
+def test_fingerprint_differs_on_file_path():
+    a = Finding(severity="high", title="SQLi", description="d", file_path="x.py")
+    b = Finding(severity="high", title="SQLi", description="d", file_path="y.py")
+    assert fingerprint(a) != fingerprint(b)
