@@ -147,6 +147,32 @@ docker run --rm -e MARIADB_ROOT_PASSWORD=pw -e MARIADB_DATABASE=secscan_test -p 
 SECSCAN_TEST_MYSQL_URL=mysql://root:pw@127.0.0.1:3306/secscan_test uv run pytest tests/test_state_mysql.py -v
 ```
 
+## MySQL setup script
+
+`scripts/setup-mysql.sh` provisions a database and application user on a MySQL/
+MariaDB server you already have admin access to (for local ephemeral testing,
+use the `docker run mariadb` one-liner above instead — this script is for a
+real, persistent server).
+
+Prerequisites: the `mysql` CLI client on `PATH`, network access to the target
+server, and admin credentials for it.
+
+```bash
+./scripts/setup-mysql.sh --host db.internal --db-name secscan \
+    --app-user secscan --admin-user root [--port 3306] [--ssl]
+```
+
+You'll be prompted (hidden input) for the admin password and a new password for
+the app user — neither is ever accepted as a command-line flag. On success it
+prints the config to export:
+
+```
+export SECSCAN_DB_URL=mysql://db.internal:3306/secscan
+export DB_USERNAME=secscan
+export DB_PASSWORD=<the password you entered>
+export DB_SSL=true   # only if --ssl was passed
+```
+
 ## Choosing a provider (`--provider`)
 
 The reviewer is always Claude Code (via the Claude Agent SDK); `--provider` only
