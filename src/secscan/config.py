@@ -72,6 +72,9 @@ class RunConfig:
     output_dir: Path = Path("output")
     state_db: Path = Path("output/secscan.sqlite3")
     db_url: str | None = None  # mysql://… selects MySQL/MariaDB; None uses state_db (SQLite)
+    db_user: str | None = None  # overrides any user embedded in db_url
+    db_password: str | None = None  # overrides any password embedded in db_url
+    db_ssl: bool = False  # encrypt the MySQL connection (no custom CA/cert/key)
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     model: str = "sonnet"

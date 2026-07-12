@@ -52,6 +52,9 @@ the environment only and never written to disk.
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
 | `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
 | `SECSCAN_DB_URL` | `mysql://user:pass@host:3306/secscan` for state + findings + targets; unset = local SQLite |
+| `DB_USERNAME` | MySQL/MariaDB username (or `--db-user`); overrides any user embedded in `SECSCAN_DB_URL` |
+| `DB_PASSWORD` | MySQL/MariaDB password (or `--db-password`); overrides any password embedded in `SECSCAN_DB_URL` |
+| `DB_SSL` | Encrypt the MySQL/MariaDB connection (or `--db-ssl`); truthy values are `"true"` and `"1"` |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | SMTP credentials for `send-report` |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP server for `--email-provider custom` (port defaults to 587) |
 | `SMTP_FROM` | From address (defaults to `SMTP_USERNAME`) |
@@ -77,7 +80,7 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --keep-clones
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --keep-clones
 --no-resume --limit --targets-only`.
 
 `--timeout` (default 900s) aborts a review if the agent produces no output for that

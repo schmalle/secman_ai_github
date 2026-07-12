@@ -37,6 +37,26 @@ def _resolve_db_url(db_url: str | None) -> str | None:
     return db_url or os.environ.get("SECSCAN_DB_URL") or None
 
 
+def _resolve_db_user(db_user: str | None) -> str | None:
+    import os
+
+    return db_user or os.environ.get("DB_USERNAME") or None
+
+
+def _resolve_db_password(db_password: str | None) -> str | None:
+    import os
+
+    return db_password or os.environ.get("DB_PASSWORD") or None
+
+
+def _resolve_db_ssl(db_ssl: bool) -> bool:
+    import os
+
+    if db_ssl:
+        return True
+    return os.environ.get("DB_SSL", "").strip().lower() in ("true", "1")
+
+
 def _split_full_name(value: str) -> tuple[str, str]:
     parts = value.split("/")
     if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -44,10 +64,21 @@ def _split_full_name(value: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _open_store(output_dir: Path, db_url: str | None):
+def _open_store(
+    output_dir: Path,
+    db_url: str | None,
+    db_user: str | None = None,
+    db_password: str | None = None,
+    db_ssl: bool = False,
+):
     from .state import StateStore
 
-    return StateStore(_resolve_db_url(db_url) or (output_dir / "secscan.sqlite3"))
+    return StateStore(
+        _resolve_db_url(db_url) or (output_dir / "secscan.sqlite3"),
+        db_user=_resolve_db_user(db_user),
+        db_password=_resolve_db_password(db_password),
+        db_ssl=_resolve_db_ssl(db_ssl),
+    )
 
 
 def _run_config(
@@ -63,6 +94,9 @@ def _run_config(
     resume: bool,
     limit: int | None,
     db_url: str | None = None,
+    db_user: str | None = None,
+    db_password: str | None = None,
+    db_ssl: bool = False,
     provider: str = "auto",
     timeout_s: float = 900.0,
 ) -> RunConfig:
@@ -70,6 +104,9 @@ def _run_config(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
         db_url=db_url,
+        db_user=db_user,
+        db_password=db_password,
+        db_ssl=db_ssl,
         filters=Filters(
             include_archived=include_archived,
             include_forks=include_forks,
@@ -101,6 +138,9 @@ def run(
     ),
     output_dir: Path = typer.Option(Path("output"), help="Where CSVs and state live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (mysql://user:pass@host:3306/db). Defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
@@ -131,7 +171,8 @@ def run(
     cfg = _run_config(
         output_dir, concurrency, model, max_turns, max_cost_usd,
         include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
-        db_url=_resolve_db_url(db_url), provider=provider, timeout_s=timeout,
+        db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
+        provider=provider, timeout_s=timeout,
     )
     asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
 
@@ -196,6 +237,9 @@ def scan(
     full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV and state live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
         "auto",
@@ -222,7 +266,8 @@ def scan(
     cfg = _run_config(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, keep_clones, False, None,
-        db_url=_resolve_db_url(db_url), provider=provider, timeout_s=timeout,
+        db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
+        provider=provider, timeout_s=timeout,
     )
     asyncio.run(scan_repo(cfg, owner, name))
 
@@ -231,11 +276,14 @@ def scan(
 def report(
     output_dir: Path = typer.Option(Path("output"), help="Where state and CSVs live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Rebuild summary.csv from the state database."""
     from .findings import write_summary_csv
 
-    store = _open_store(output_dir, db_url)
+    store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
     rows = store.all_records()
     out = write_summary_csv(output_dir / "summary.csv", rows)
     typer.echo(f"Wrote {out} ({len(rows)} repos)")
@@ -251,6 +299,9 @@ def send_report(
     max_findings: int = typer.Option(50, help="Cap the findings included in the email."),
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Email the latest scan results as an HTML report (with a plain-text part)."""
     from datetime import datetime, timezone
@@ -264,7 +315,7 @@ def send_report(
         severity_sort_key,
     )
 
-    store = _open_store(output_dir, db_url)
+    store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
     records = store.all_records()
 
     findings: list[dict] = []
