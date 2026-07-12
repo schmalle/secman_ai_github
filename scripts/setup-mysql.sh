@@ -33,6 +33,15 @@ if [[ -z "$HOST" || -z "$DB_NAME" || -z "$APP_USER" || -z "$ADMIN_USER" ]]; then
     usage
 fi
 
+if [[ ! "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "Error: --db-name must contain only letters, digits, and underscores." >&2
+    exit 1
+fi
+if [[ ! "$APP_USER" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "Error: --app-user must contain only letters, digits, and underscores." >&2
+    exit 1
+fi
+
 if ! command -v mysql >/dev/null 2>&1; then
     echo "Error: the 'mysql' CLI client is not on PATH." >&2
     exit 1
@@ -50,9 +59,12 @@ if [[ "$APP_PASSWORD" != "$APP_PASSWORD_CONFIRM" ]]; then
     exit 1
 fi
 
-mysql --host="$HOST" --port="$PORT" --user="$ADMIN_USER" --password="$ADMIN_PASSWORD" <<SQL
+ESCAPED_APP_PASSWORD="${APP_PASSWORD//\\/\\\\}"
+ESCAPED_APP_PASSWORD="${ESCAPED_APP_PASSWORD//\'/\\\'}"
+
+MYSQL_PWD="$ADMIN_PASSWORD" mysql --host="$HOST" --port="$PORT" --user="$ADMIN_USER" <<SQL
 CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4;
-CREATE USER IF NOT EXISTS '$APP_USER'@'%' IDENTIFIED BY '$APP_PASSWORD';
+CREATE USER IF NOT EXISTS '$APP_USER'@'%' IDENTIFIED BY '$ESCAPED_APP_PASSWORD';
 GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$APP_USER'@'%';
 FLUSH PRIVILEGES;
 SQL
