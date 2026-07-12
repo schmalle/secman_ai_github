@@ -80,12 +80,17 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --keep-clones
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --keep-clones
 --no-resume --limit --targets-only`.
 
 `--timeout` (default 900s) aborts a review if the agent produces no output for that
 long — a stall guard (e.g. a permission prompt with no interactive terminal to answer
 it), not a cap on total review duration. `--timeout 0` disables it.
+
+`--no-db` skips all DB storage (state, findings, targets) for `run`/`scan` — only
+per-repo `findings.csv` is written; `summary.csv` is skipped since it's normally
+rebuilt from the state store. Useful for one-off scans where you don't want
+`output/secscan.sqlite3` (or a configured MySQL backend) touched at all.
 
 ## Authentication: GitHub App vs PAT
 

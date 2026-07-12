@@ -97,6 +97,7 @@ def _run_config(
     db_user: str | None = None,
     db_password: str | None = None,
     db_ssl: bool = False,
+    no_db: bool = False,
     provider: str = "auto",
     timeout_s: float = 900.0,
 ) -> RunConfig:
@@ -107,6 +108,7 @@ def _run_config(
         db_user=db_user,
         db_password=db_password,
         db_ssl=db_ssl,
+        no_db=no_db,
         filters=Filters(
             include_archived=include_archived,
             include_forks=include_forks,
@@ -141,6 +143,7 @@ def run(
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+    no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
@@ -172,7 +175,7 @@ def run(
         output_dir, concurrency, model, max_turns, max_cost_usd,
         include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
         db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-        provider=provider, timeout_s=timeout,
+        no_db=no_db, provider=provider, timeout_s=timeout,
     )
     asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
 
@@ -240,6 +243,7 @@ def scan(
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+    no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
         "auto",
@@ -267,7 +271,7 @@ def scan(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, keep_clones, False, None,
         db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-        provider=provider, timeout_s=timeout,
+        no_db=no_db, provider=provider, timeout_s=timeout,
     )
     asyncio.run(scan_repo(cfg, owner, name))
 

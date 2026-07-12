@@ -79,3 +79,7 @@ def test_resolve_db_ssl_env_true_when_flag_false(monkeypatch):
 def test_resolve_db_ssl_false_when_neither_set(monkeypatch):
     monkeypatch.delenv("DB_SSL", raising=False)
     assert _resolve_db_ssl(False) is False
+
+
+def test_no_db_defaults_false():
+    assert RunConfig().no_db is False

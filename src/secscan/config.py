@@ -75,6 +75,7 @@ class RunConfig:
     db_user: str | None = None  # overrides any user embedded in db_url
     db_password: str | None = None  # overrides any password embedded in db_url
     db_ssl: bool = False  # encrypt the MySQL connection (no custom CA/cert/key)
+    no_db: bool = False  # skip all DB storage; findings.csv still written, summary.csv skipped
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     model: str = "sonnet"

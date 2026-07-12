@@ -100,10 +100,12 @@ async def _process_repo(
         path: Path | None = None
         try:
             token = await _mint_token(auth, repo)
-            store.mark(owner, name, Status.CLONED)
+            if store is not None:
+                store.mark(owner, name, Status.CLONED)
             path = await _clone(repo, token, _clone_root(cfg))
 
-            store.mark(owner, name, Status.REVIEWING)
+            if store is not None:
+                store.mark(owner, name, Status.REVIEWING)
             res = await review_repo(
                 path,
                 repo.full_name,
@@ -116,27 +118,31 @@ async def _process_repo(
 
             csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
             write_findings_csv(csv_path, repo.full_name, res.high_critical)
-            store.replace_findings(owner, name, res.high_critical)
+            if store is not None:
+                store.replace_findings(owner, name, res.high_critical)
 
             if res.error and not res.findings:
-                store.record_failure(owner, name, res.error)
+                if store is not None:
+                    store.record_failure(owner, name, res.error)
                 typer.echo(f"  ! {repo.full_name}: review error: {res.error}")
             else:
-                store.record_result(
-                    owner, name,
-                    critical=res.critical_count,
-                    high=res.high_count,
-                    total=res.total_findings,
-                    duration_s=res.duration_s,
-                    cost_usd=res.cost_usd,
-                    reviewed_at=_now(),
-                )
+                if store is not None:
+                    store.record_result(
+                        owner, name,
+                        critical=res.critical_count,
+                        high=res.high_count,
+                        total=res.total_findings,
+                        duration_s=res.duration_s,
+                        cost_usd=res.cost_usd,
+                        reviewed_at=_now(),
+                    )
                 typer.echo(
                     f"  ✓ {repo.full_name}: {res.critical_count} critical, "
                     f"{res.high_count} high (${res.cost_usd:.3f})"
                 )
         except Exception as exc:
-            store.record_failure(owner, name, redact_url(str(exc)))
+            if store is not None:
+                store.record_failure(owner, name, redact_url(str(exc)))
             typer.echo(f"  ! {repo.full_name}: {redact_url(str(exc))}")
         finally:
             if path is not None and not cfg.keep_clones:
@@ -150,7 +156,9 @@ async def run_scan(
     targets_only: bool = False,
 ) -> None:
     auth = build_auth()
-    store = StateStore(cfg.state_target)
+    store = None if cfg.no_db else StateStore(
+        cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
+    )
     provider_env = _resolve_provider_env(cfg)
 
     if targets_only:
@@ -167,16 +175,18 @@ async def run_scan(
 
     # Explicit targets (secscan repo add) and unmatched allowlist entries join the
     # scope; they bypass Filters because they were added by hand.
-    repos, unresolved = _merge_scope(repos, _load_allowlist(repos_file), store.list_targets())
+    targets = store.list_targets() if store is not None else []
+    repos, unresolved = _merge_scope(repos, _load_allowlist(repos_file), targets)
     for owner, name in unresolved:
         repos.append(await asyncio.to_thread(resolve_target, owner, name, auth))
 
     # Register all, then decide which to actually review (resume skips done).
     todo: list[RepoInfo] = []
     for repo in repos:
-        store.upsert_pending(repo.owner, repo.name)
-        if cfg.resume and store.is_done(repo.owner, repo.name):
-            continue
+        if store is not None:
+            store.upsert_pending(repo.owner, repo.name)
+            if cfg.resume and store.is_done(repo.owner, repo.name):
+                continue
         todo.append(repo)
 
     if cfg.limit is not None:
@@ -186,6 +196,10 @@ async def run_scan(
 
     sem = asyncio.Semaphore(cfg.concurrency)
     await asyncio.gather(*(_process_repo(r, auth, store, cfg, sem, provider_env) for r in todo))
+
+    if store is None:
+        typer.echo("Done. --no-db: summary.csv skipped (no state store).")
+        return
 
     summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
     records = store.all_records()
@@ -228,14 +242,21 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
 async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
     """Clone, review, and record one remote repo by name (no enumeration)."""
     auth = build_auth()
-    store = StateStore(cfg.state_target)
+    store = None if cfg.no_db else StateStore(
+        cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
+    )
     provider_env = _resolve_provider_env(cfg)
 
     repo = await asyncio.to_thread(resolve_target, owner, name, auth)
-    store.upsert_pending(owner, name)
+    if store is not None:
+        store.upsert_pending(owner, name)
 
     sem = asyncio.Semaphore(1)
     await _process_repo(repo, auth, store, cfg, sem, provider_env)
+
+    if store is None:
+        typer.echo("Done. --no-db: summary.csv skipped (no state store).")
+        return
 
     summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
     typer.echo(f"Done. summary={summary}")

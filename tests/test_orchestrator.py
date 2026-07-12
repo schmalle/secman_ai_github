@@ -174,3 +174,46 @@ async def test_scan_repo_processes_single_repo_and_writes_summary(tmp_path, monk
     record = store.get("octo", "demo")
     assert record is not None
     assert record.critical_count == 1
+
+
+async def test_process_repo_skips_store_when_no_db(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root):
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        return ReviewResult(repo_full_name=full_name)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = RunConfig(output_dir=tmp_path, no_db=True)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    # store=None must not raise — this is the core assertion.
+    await orch._process_repo(_repo(name="demo"), object(), None, cfg, sem, provider_env)
+
+    assert (tmp_path / "octo__demo" / "findings.csv").exists()
+
+
+async def test_run_scan_no_db_skips_summary_csv(tmp_path, monkeypatch, capsys):
+    fake_app = _FakeApp()
+    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=fake_app))
+
+    async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
+        pass
+
+    monkeypatch.setattr(orch, "_process_repo", fake_process_repo)
+
+    cfg = RunConfig(output_dir=tmp_path, no_db=True)
+    await orch.run_scan(cfg, targets_only=True)
+
+    assert not (tmp_path / "summary.csv").exists()
+    assert "summary.csv skipped" in capsys.readouterr().out
