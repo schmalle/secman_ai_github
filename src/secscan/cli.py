@@ -16,7 +16,7 @@ from pathlib import Path
 
 import typer
 
-from .config import Filters, RunConfig
+from .config import ConfigError, Filters, RunConfig
 
 app = typer.Typer(
     add_completion=False,
@@ -98,9 +98,13 @@ def _run_config(
     db_password: str | None = None,
     db_ssl: bool = False,
     no_db: bool = False,
+    create_issues: bool = False,
+    issue_dry_run: bool = False,
     provider: str = "auto",
     timeout_s: float = 900.0,
 ) -> RunConfig:
+    if no_db and create_issues:
+        raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
@@ -109,6 +113,8 @@ def _run_config(
         db_password=db_password,
         db_ssl=db_ssl,
         no_db=no_db,
+        create_issues=create_issues,
+        issue_dry_run=issue_dry_run,
         filters=Filters(
             include_archived=include_archived,
             include_forks=include_forks,
@@ -144,6 +150,8 @@ def run(
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
+    create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
@@ -175,7 +183,8 @@ def run(
         output_dir, concurrency, model, max_turns, max_cost_usd,
         include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
         db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-        no_db=no_db, provider=provider, timeout_s=timeout,
+        no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+        provider=provider, timeout_s=timeout,
     )
     asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
 
@@ -244,6 +253,8 @@ def scan(
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
+    create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
         "auto",
@@ -271,7 +282,8 @@ def scan(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, keep_clones, False, None,
         db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-        no_db=no_db, provider=provider, timeout_s=timeout,
+        no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+        provider=provider, timeout_s=timeout,
     )
     asyncio.run(scan_repo(cfg, owner, name))
 

@@ -80,7 +80,7 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --keep-clones
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --keep-clones
 --no-resume --limit --targets-only`.
 
 `--timeout` (default 900s) aborts a review if the agent produces no output for that
@@ -123,6 +123,26 @@ remote repo on demand without registering it as a target, use
 `run` does for a single repo, but doesn't add it to the target list. `scan` requires
 a PAT: a single-repo scan doesn't enumerate App installations, so an App-only
 credential has no installation token to clone with.
+
+## Creating GitHub issues
+
+`--create-issues` (on `run`/`scan`) opens one GitHub issue per new High/Critical
+finding, deduped by a content fingerprint (severity + category + title + file
+path) tracked in the state DB — re-scanning the same repo never opens a second
+issue for a finding already tracked, it just bumps that finding's "last seen"
+timestamp. `--dry-run` previews what would be created/skipped with **zero**
+GitHub API calls and zero DB writes. Requires the DB (`--no-db --create-issues`
+is a config error).
+
+```bash
+uv run secscan scan octo/webapp --create-issues --dry-run   # preview
+uv run secscan scan octo/webapp --create-issues             # actually open issues
+```
+
+**Prerequisite:** the GitHub App's permissions need **Issues: Write** added
+(alongside the existing Contents: Read, Metadata: Read) — existing installations
+require re-approval after this permission is added to the App manifest. PAT mode
+already covers this via the `repo` scope.
 
 ## MySQL / MariaDB backend
 

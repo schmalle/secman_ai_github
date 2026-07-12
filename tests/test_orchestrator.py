@@ -217,3 +217,53 @@ async def test_run_scan_no_db_skips_summary_csv(tmp_path, monkeypatch, capsys):
 
     assert not (tmp_path / "summary.csv").exists()
     assert "summary.csv skipped" in capsys.readouterr().out
+
+
+async def test_process_repo_creates_issues_when_enabled(tmp_path, monkeypatch):
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+    import secscan.orchestrator as orch_module
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root):
+        return tmp_path / "clone"
+
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        return ReviewResult(repo_full_name=full_name, high_critical=[finding], findings=[finding])
+
+    created_calls = []
+
+    class _FakeGhRepo:
+        def create_issue(self, title, body, labels):
+            created_calls.append(title)
+            class _I:
+                number = 1
+                html_url = "https://github.com/octo/demo/issues/1"
+            return _I()
+
+    class _FakeGithubClient:
+        def get_repo(self, full_name):
+            return _FakeGhRepo()
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+    monkeypatch.setattr(orch_module, "Github", lambda auth: _FakeGithubClient())
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", create_issues=True)
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    class _FakeAuthCtx:
+        def token_for(self, repo):
+            return "tok"
+
+    await orch._process_repo(_repo(name="demo"), _FakeAuthCtx(), store, cfg, sem, provider_env)
+
+    assert created_calls == ["[secscan] high: SQLi (app.py)"]

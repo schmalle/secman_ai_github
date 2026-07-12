@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
+from github import Auth, Github
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .cloner import CloneError, cleanup, clone_repo
@@ -18,6 +19,7 @@ from .config import RunConfig
 from .findings import write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
 from .github_auth import AuthContext, build_auth, resolve_target
+from .issues import process_finding
 from .providers import ProviderEnv, model_hint, resolve_model, resolve_provider
 from .reviewer import review_repo
 from .state import StateStore, Status
@@ -120,6 +122,23 @@ async def _process_repo(
             write_findings_csv(csv_path, repo.full_name, res.high_critical)
             if store is not None:
                 store.replace_findings(owner, name, res.high_critical)
+
+            if store is not None and cfg.create_issues and res.high_critical:
+                gh_client = Github(auth=Auth.Token(auth.token_for(repo)))
+                gh_repo = gh_client.get_repo(repo.full_name)
+                created = skipped = 0
+                for finding in res.high_critical:
+                    outcome = process_finding(
+                        gh_repo, store, owner, name, finding,
+                        seen_at=_now(), dry_run=cfg.issue_dry_run,
+                    )
+                    if outcome.action in ("created", "would_create"):
+                        created += 1
+                    else:
+                        skipped += 1
+                verb = "would create" if cfg.issue_dry_run else "created"
+                skip_verb = "would skip" if cfg.issue_dry_run else "skipped"
+                typer.echo(f"    issues: {verb} {created}, {skip_verb} {skipped}")
 
             if res.error and not res.findings:
                 if store is not None:

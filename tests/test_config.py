@@ -83,3 +83,24 @@ def test_resolve_db_ssl_false_when_neither_set(monkeypatch):
 
 def test_no_db_defaults_false():
     assert RunConfig().no_db is False
+
+
+from secscan.config import ConfigError
+
+
+def test_create_issues_and_issue_dry_run_default_false():
+    cfg = RunConfig()
+    assert cfg.create_issues is False
+    assert cfg.issue_dry_run is False
+
+
+def test_run_config_rejects_no_db_with_create_issues():
+    import pytest
+    from secscan.cli import _run_config
+
+    with pytest.raises(ConfigError, match="no-db.*create-issues|create-issues.*no-db"):
+        _run_config(
+            output_dir=Path("output"), concurrency=1, model="sonnet", max_turns=1,
+            max_cost_usd=None, include_archived=False, include_forks=False, max_size_mb=0,
+            keep_clones=True, resume=False, limit=None, no_db=True, create_issues=True,
+        )
