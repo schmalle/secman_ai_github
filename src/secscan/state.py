@@ -48,6 +48,17 @@ class RepoRecord:
         return f"{self.owner}/{self.repo}"
 
 
+@dataclass
+class IssueRecord:
+    owner: str
+    repo: str
+    fingerprint: str
+    issue_number: int
+    issue_url: str
+    first_seen_at: str
+    last_seen_at: str
+
+
 # -- schema (per dialect) -------------------------------------------------------
 
 _REPOS_SQLITE = """
@@ -135,6 +146,33 @@ CREATE TABLE IF NOT EXISTS targets (
 """
 
 
+_ISSUE_TRACKING_SQLITE = """
+CREATE TABLE IF NOT EXISTS issue_tracking (
+    owner         TEXT NOT NULL,
+    repo          TEXT NOT NULL,
+    fingerprint   TEXT NOT NULL,
+    issue_number  INTEGER NOT NULL,
+    issue_url     TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at  TEXT NOT NULL,
+    PRIMARY KEY (owner, repo, fingerprint)
+);
+"""
+
+_ISSUE_TRACKING_MYSQL = """
+CREATE TABLE IF NOT EXISTS issue_tracking (
+    owner         VARCHAR(255) NOT NULL,
+    repo          VARCHAR(255) NOT NULL,
+    fingerprint   VARCHAR(64) NOT NULL,
+    issue_number  INTEGER NOT NULL,
+    issue_url     TEXT NOT NULL,
+    first_seen_at VARCHAR(64) NOT NULL,
+    last_seen_at  VARCHAR(64) NOT NULL,
+    PRIMARY KEY (owner, repo, fingerprint)
+);
+"""
+
+
 @dataclass(frozen=True)
 class _Dialect:
     placeholder: str
@@ -145,13 +183,13 @@ class _Dialect:
 _SQLITE_DIALECT = _Dialect(
     placeholder="?",
     insert_ignore="INSERT OR IGNORE INTO",
-    schema=(_REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE),
+    schema=(_REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE, _ISSUE_TRACKING_SQLITE),
 )
 
 _MYSQL_DIALECT = _Dialect(
     placeholder="%s",
     insert_ignore="INSERT IGNORE INTO",
-    schema=(_REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL),
+    schema=(_REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL, _ISSUE_TRACKING_MYSQL),
 )
 
 
@@ -325,6 +363,40 @@ class StateStore:
             (owner, repo),
         )
         return [dict(r) for r in cur.fetchall()]
+
+    # -- GitHub issue dedup -------------------------------------------------------
+
+    def find_issue(self, owner: str, repo: str, fingerprint: str) -> "IssueRecord | None":
+        cur = self._exec(
+            "SELECT * FROM issue_tracking WHERE owner = ? AND repo = ? AND fingerprint = ?",
+            (owner, repo, fingerprint),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return IssueRecord(
+            owner=row["owner"], repo=row["repo"], fingerprint=row["fingerprint"],
+            issue_number=row["issue_number"], issue_url=row["issue_url"],
+            first_seen_at=row["first_seen_at"], last_seen_at=row["last_seen_at"],
+        )
+
+    def record_issue_created(
+        self, owner: str, repo: str, fingerprint: str,
+        issue_number: int, issue_url: str, seen_at: str,
+    ) -> None:
+        self._exec(
+            "INSERT INTO issue_tracking "
+            "(owner, repo, fingerprint, issue_number, issue_url, first_seen_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (owner, repo, fingerprint, issue_number, issue_url, seen_at, seen_at),
+        )
+
+    def touch_issue_seen(self, owner: str, repo: str, fingerprint: str, seen_at: str) -> None:
+        self._exec(
+            "UPDATE issue_tracking SET last_seen_at = ? "
+            "WHERE owner = ? AND repo = ? AND fingerprint = ?",
+            (seen_at, owner, repo, fingerprint),
+        )
 
     # -- scan targets (explicitly-added repos) ------------------------------------
 

@@ -1,6 +1,6 @@
 from secscan.findings import Finding
 from secscan.state import (
-    RepoRecord, StateStore, Status, _dialect_for, _mysql_connect_kwargs,
+    IssueRecord, RepoRecord, StateStore, Status, _dialect_for, _mysql_connect_kwargs,
     _MYSQL_DIALECT, _SQLITE_DIALECT,
 )
 
@@ -197,3 +197,42 @@ def test_repo_record_is_dataclass_usable_for_summary():
     rec = RepoRecord(owner="octo", repo="repo", status=Status.DONE)
     d = dataclasses.asdict(rec)
     assert d["owner"] == "octo"
+
+
+def test_find_issue_returns_none_when_untracked(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    assert store.find_issue("octo", "repo", "deadbeef") is None
+
+
+def test_record_issue_created_then_find_issue(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.record_issue_created(
+        "octo", "repo", "deadbeef", 42, "https://github.com/octo/repo/issues/42",
+        "2026-07-12T00:00:00+00:00",
+    )
+    rec = store.find_issue("octo", "repo", "deadbeef")
+    assert rec is not None
+    assert rec.issue_number == 42
+    assert rec.issue_url == "https://github.com/octo/repo/issues/42"
+    assert rec.first_seen_at == "2026-07-12T00:00:00+00:00"
+    assert rec.last_seen_at == "2026-07-12T00:00:00+00:00"
+
+
+def test_touch_issue_seen_updates_last_seen_only(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.record_issue_created(
+        "octo", "repo", "deadbeef", 42, "https://github.com/octo/repo/issues/42",
+        "2026-07-01T00:00:00+00:00",
+    )
+    store.touch_issue_seen("octo", "repo", "deadbeef", "2026-07-12T00:00:00+00:00")
+    rec = store.find_issue("octo", "repo", "deadbeef")
+    assert rec.first_seen_at == "2026-07-01T00:00:00+00:00"  # unchanged
+    assert rec.last_seen_at == "2026-07-12T00:00:00+00:00"  # bumped
+
+
+def test_issue_tracking_scoped_by_owner_repo_fingerprint(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.record_issue_created("octo", "one", "fp1", 1, "url1", "t1")
+    store.record_issue_created("octo", "two", "fp1", 2, "url2", "t2")  # same fp, different repo
+    assert store.find_issue("octo", "one", "fp1").issue_number == 1
+    assert store.find_issue("octo", "two", "fp1").issue_number == 2
