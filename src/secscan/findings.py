@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import hashlib
 import json
 import re
 from enum import Enum
@@ -148,6 +149,15 @@ def parse_findings(data: Any) -> list[Finding]:
 
 def filter_high_critical(findings: Iterable[Finding]) -> list[Finding]:
     return [f for f in findings if f.severity in _HIGH_CRITICAL]
+
+
+def fingerprint(finding: Finding) -> str:
+    """Stable content hash for a finding — excludes line_range/description so
+    minor LLM rewording or line drift between reruns doesn't change the
+    identity used for GitHub issue dedup (Part B) and the secman cve value
+    (Part C)."""
+    key = f"{finding.severity.value}|{finding.category}|{finding.title}|{finding.file_path}"
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def _severity_rank(f: Finding) -> int:

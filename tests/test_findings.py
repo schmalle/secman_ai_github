@@ -4,6 +4,7 @@ from secscan.findings import (
     Finding,
     Severity,
     filter_high_critical,
+    fingerprint,
     parse_findings,
     write_findings_csv,
     write_summary_csv,
@@ -129,3 +130,28 @@ def test_write_summary_csv(tmp_path):
         parsed = list(csv.DictReader(fh))
     assert parsed[0]["repo"] == "repo"
     assert parsed[0]["critical_count"] == "1"
+
+
+def test_fingerprint_stable_across_line_range_changes():
+    a = Finding(severity="high", title="SQLi", description="d", file_path="x.py", line_range="10-12", category="CWE-89")
+    b = Finding(severity="high", title="SQLi", description="d", file_path="x.py", line_range="99-101", category="CWE-89")
+    assert fingerprint(a) == fingerprint(b)
+
+
+def test_fingerprint_differs_on_title():
+    a = Finding(severity="high", title="SQLi", description="d", file_path="x.py")
+    b = Finding(severity="high", title="XSS", description="d", file_path="x.py")
+    assert fingerprint(a) != fingerprint(b)
+
+
+def test_fingerprint_differs_on_severity():
+    a = Finding(severity="high", title="SQLi", description="d", file_path="x.py")
+    b = Finding(severity="critical", title="SQLi", description="d", file_path="x.py")
+    assert fingerprint(a) != fingerprint(b)
+
+
+def test_fingerprint_is_hex_sha256():
+    f = Finding(severity="high", title="SQLi", description="d", file_path="x.py")
+    fp = fingerprint(f)
+    assert len(fp) == 64
+    int(fp, 16)  # raises ValueError if not hex
