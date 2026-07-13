@@ -8,6 +8,7 @@ Commands:
   report      rebuild the aggregate summary.csv from the state DB
   repo        manage explicitly-added scan targets (add / list / remove)
   send-report email the latest results as an HTML report (Gmail / O365 / custom SMTP)
+  push-to-secman push High/Critical findings from the state DB into secman
 """
 
 from __future__ import annotations
@@ -55,6 +56,24 @@ def _resolve_db_ssl(db_ssl: bool) -> bool:
     if db_ssl:
         return True
     return os.environ.get("DB_SSL", "").strip().lower() in ("true", "1")
+
+
+def _resolve_secman_url(url: str | None) -> str | None:
+    import os
+
+    return url or os.environ.get("SECMAN_URL") or None
+
+
+def _resolve_secman_username(username: str | None) -> str | None:
+    import os
+
+    return username or os.environ.get("SECMAN_USERNAME") or None
+
+
+def _resolve_secman_password(password: str | None) -> str | None:
+    import os
+
+    return password or os.environ.get("SECMAN_PASSWORD") or None
 
 
 def _split_full_name(value: str) -> tuple[str, str]:
@@ -360,6 +379,88 @@ def send_report(
     typer.echo(
         f"Sent report to {', '.join(email_to)} ({len(records)} repos, {len(findings)} findings)"
     )
+
+
+@app.command("push-to-secman")
+def push_to_secman(
+    secman_url: str = typer.Option(None, "--secman-url", help="secman base URL (or SECMAN_URL env)."),
+    secman_username: str = typer.Option(None, "--secman-username", help="secman username (or SECMAN_USERNAME env)."),
+    secman_password: str = typer.Option(None, "--secman-password", help="secman password (or SECMAN_PASSWORD env)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview what would be pushed; makes zero login/API calls."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env)."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env)."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env)."),
+) -> None:
+    """Push High/Critical findings from the state DB into secman via cli-add."""
+    from datetime import datetime, timezone
+
+    from . import secman_client
+    from .findings import fingerprint
+
+    url = _resolve_secman_url(secman_url)
+    username = _resolve_secman_username(secman_username)
+    password = _resolve_secman_password(secman_password)
+    if not url or not username or not password:
+        typer.echo(
+            "Error: secman URL/username/password required "
+            "(--secman-url/--secman-username/--secman-password or "
+            "SECMAN_URL/SECMAN_USERNAME/SECMAN_PASSWORD env vars)",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
+    records = store.all_records()
+
+    token = None
+    if not dry_run:
+        try:
+            token = secman_client.login(url, username, password)
+        except secman_client.SecmanPushError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1)
+
+    pushed = failed = 0
+    for rec in records:
+        for row in store.get_findings(rec.owner, rec.repo):
+            if row["severity"] not in ("critical", "high"):
+                continue
+
+            class _RowFinding:
+                severity = type("S", (), {"value": row["severity"]})()
+                category = row["category"]
+                title = row["title"]
+                file_path = row["file_path"]
+
+            fp = fingerprint(_RowFinding())
+            issue = store.find_issue(rec.owner, rec.repo, fp)
+            days_open = 0
+            if issue is not None:
+                first_seen = datetime.fromisoformat(issue.first_seen_at)
+                days_open = max(0, (datetime.now(timezone.utc) - first_seen).days)
+            cve = f"SECSCAN:{row['category'] or 'FINDING'}:{fp[:12]}"
+            hostname = rec.full_name
+
+            if dry_run:
+                typer.echo(f"would push {hostname} {cve} {row['severity'].upper()}")
+                pushed += 1
+                continue
+
+            try:
+                secman_client.push_vulnerability(
+                    url, token,
+                    hostname=hostname, cve=cve,
+                    criticality=row["severity"].upper(), days_open=days_open,
+                )
+                pushed += 1
+            except secman_client.SecmanPushError as exc:
+                typer.echo(f"failed: {hostname} {cve}: {exc}", err=True)
+                failed += 1
+
+    verb = "would push" if dry_run else "pushed"
+    typer.echo(f"{verb} {pushed}" + ("" if dry_run else f", failed {failed}"))
 
 
 _TARGET_DB_HELP = "MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."

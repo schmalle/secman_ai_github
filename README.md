@@ -58,6 +58,9 @@ the environment only and never written to disk.
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | SMTP credentials for `send-report` |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP server for `--email-provider custom` (port defaults to 587) |
 | `SMTP_FROM` | From address (defaults to `SMTP_USERNAME`) |
+| `SECMAN_URL` | secman base URL for `push-to-secman` (or `--secman-url`) |
+| `SECMAN_USERNAME` | secman username for `push-to-secman` (or `--secman-username`); needs ADMIN or VULN role |
+| `SECMAN_PASSWORD` | secman password for `push-to-secman` (or `--secman-password`) |
 
 ## Usage
 
@@ -77,6 +80,8 @@ uv run secscan run                        # all reachable repos + explicit targe
 uv run secscan run --db-url mysql://user:pass@host:3306/secscan   # MySQL/MariaDB state
 uv run secscan report                     # rebuild summary.csv from state
 uv run secscan send-report --email-to sec@example.com --email-provider gmail
+uv run secscan push-to-secman                              # push High/Critical findings to secman
+uv run secscan push-to-secman --dry-run                    # preview only
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
@@ -143,6 +148,30 @@ uv run secscan scan octo/webapp --create-issues             # actually open issu
 (alongside the existing Contents: Read, Metadata: Read) — existing installations
 require re-approval after this permission is added to the App manifest. PAT mode
 already covers this via the `repo` scope.
+
+## Push findings to secman
+
+`secscan push-to-secman` pushes every High/Critical finding currently in the
+state DB into [secman](https://github.com/schmalle/secman) via its
+`POST /api/vulnerabilities/cli-add` endpoint (requires an ADMIN or VULN-role
+secman account). One secman asset is created per scanned repo (`owner/repo` as
+the hostname); re-running after a later scan updates the existing secman
+vulnerability rather than duplicating it (secman upserts by asset + a stable
+synthetic identifier derived from the finding's fingerprint).
+
+```bash
+export SECMAN_URL=https://secman.example.com
+export SECMAN_USERNAME=vulnbot
+export SECMAN_PASSWORD=…
+uv run secscan push-to-secman --dry-run   # preview what would be pushed
+uv run secscan push-to-secman             # actually push
+```
+
+**Known limitation:** secman's `cli-add` schema has no free-text field — it only
+shows a compact identifier (`SECSCAN:<category>:<fingerprint prefix>`), severity,
+and asset name. Full finding detail (description, recommendation, file/line)
+stays in secscan's own `findings.csv`/state DB and, if `--create-issues` was
+used, the linked GitHub issue.
 
 ## MySQL / MariaDB backend
 
