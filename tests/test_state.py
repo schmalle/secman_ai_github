@@ -236,3 +236,74 @@ def test_issue_tracking_scoped_by_owner_repo_fingerprint(tmp_path):
     store.record_issue_created("octo", "two", "fp1", 2, "url2", "t2")  # same fp, different repo
     assert store.find_issue("octo", "one", "fp1").issue_number == 1
     assert store.find_issue("octo", "two", "fp1").issue_number == 2
+
+
+def test_active_conn_is_shared_connection_for_sqlite_across_threads(tmp_path):
+    import threading
+
+    store = StateStore(tmp_path / "s.sqlite3")
+    results = {}
+
+    def worker():
+        results["conn"] = store._active_conn
+        store.upsert_pending("octo", "from-thread")
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+
+    assert results["conn"] is store._conn
+    assert store.get("octo", "from-thread") is not None
+
+
+def test_active_conn_opens_one_mysql_connection_per_thread(monkeypatch):
+    import threading
+
+    from secscan import state as state_module
+
+    created = []
+
+    class _FakeCursor:
+        def execute(self, *a, **kw):
+            pass
+
+        def fetchall(self):
+            return []
+
+        def fetchone(self):
+            return None
+
+    class _FakeConn:
+        def __init__(self):
+            created.append(self)
+
+        def cursor(self):
+            return _FakeCursor()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_connect_mysql(url, *, user=None, password=None, ssl=False):
+        return _FakeConn()
+
+    monkeypatch.setattr(state_module, "_connect_mysql", fake_connect_mysql)
+
+    store = state_module.StateStore("mysql://u:p@h/db")
+    assert store._active_conn is store._conn  # main thread reuses the __init__ connection
+
+    results = {}
+
+    def worker():
+        results["conn1"] = store._active_conn
+        results["conn2"] = store._active_conn  # same thread, second call — must be cached
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+
+    assert results["conn1"] is not store._conn  # worker thread got its own connection
+    assert results["conn1"] is results["conn2"]  # cached within that thread
+    assert len(created) == 2  # one for __init__ (main thread), one for the worker thread

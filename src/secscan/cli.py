@@ -198,13 +198,17 @@ def run(
 
     from .orchestrator import run_scan
 
-    cfg = _run_config(
-        output_dir, concurrency, model, max_turns, max_cost_usd,
-        include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
-        db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-        no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
-        provider=provider, timeout_s=timeout,
-    )
+    try:
+        cfg = _run_config(
+            output_dir, concurrency, model, max_turns, max_cost_usd,
+            include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
+            db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
+            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            provider=provider, timeout_s=timeout,
+        )
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
     asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
 
 
@@ -297,13 +301,17 @@ def scan(
     from .orchestrator import scan_repo
 
     owner, name = _split_full_name(full_name)
-    cfg = _run_config(
-        output_dir, 1, model, max_turns, max_cost_usd,
-        False, False, 0, keep_clones, False, None,
-        db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-        no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
-        provider=provider, timeout_s=timeout,
-    )
+    try:
+        cfg = _run_config(
+            output_dir, 1, model, max_turns, max_cost_usd,
+            False, False, 0, keep_clones, False, None,
+            db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
+            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            provider=provider, timeout_s=timeout,
+        )
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
     asyncio.run(scan_repo(cfg, owner, name))
 
 

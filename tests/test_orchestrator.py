@@ -267,3 +267,61 @@ async def test_process_repo_creates_issues_when_enabled(tmp_path, monkeypatch):
     await orch._process_repo(_repo(name="demo"), _FakeAuthCtx(), store, cfg, sem, provider_env)
 
     assert created_calls == ["[secscan] high: SQLi (app.py)"]
+
+
+async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypatch):
+    """--create-issues --dry-run must make zero GitHub API calls: Github() itself
+    must never be constructed.
+
+    Note: _process_repo catches all exceptions internally (records a failure and
+    keeps going), so a stub that merely *raises* if called would be swallowed and
+    this test would pass even on unfixed code. Instead we track invocations and
+    assert the counter stayed at zero.
+    """
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+    import secscan.orchestrator as orch_module
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root):
+        return tmp_path / "clone"
+
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        return ReviewResult(repo_full_name=full_name, high_critical=[finding], findings=[finding])
+
+    github_calls = []
+
+    def _tracking_github(*args, **kwargs):
+        github_calls.append((args, kwargs))
+        raise AssertionError("Github() must not be constructed during --dry-run")
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+    monkeypatch.setattr(orch_module, "Github", _tracking_github)
+
+    cfg = RunConfig(
+        output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3",
+        create_issues=True, issue_dry_run=True,
+    )
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    class _FakeAuthCtx:
+        def token_for(self, repo):
+            return "tok"
+
+    await orch._process_repo(_repo(name="demo"), _FakeAuthCtx(), store, cfg, sem, provider_env)
+
+    assert github_calls == []
+    # Confirm the repo was still processed successfully (not silently swallowed
+    # as a failure) — dry-run issue handling must run to completion.
+    rec = store.get("octo", "demo")
+    assert rec is not None
+    assert rec.status.value == "done"

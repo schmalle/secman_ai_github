@@ -11,6 +11,7 @@ anything else is a SQLite file path (the default).
 from __future__ import annotations
 
 import sqlite3
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from enum import Enum
@@ -264,8 +265,14 @@ class StateStore:
         db_password: str | None = None,
         db_ssl: bool = False,
     ):
+        self._target = target
         self._d = _dialect_for(target)
-        if _is_mysql(target):
+        self._is_mysql = _is_mysql(target)
+        self._db_user = db_user
+        self._db_password = db_password
+        self._db_ssl = db_ssl
+        self._thread_local = threading.local()  # per-thread MySQL connections only
+        if self._is_mysql:
             self._conn = _connect_mysql(str(target), user=db_user, password=db_password, ssl=db_ssl)
         else:
             self._conn = _connect_sqlite(Path(target))
@@ -279,15 +286,41 @@ class StateStore:
 
     # -- internals --------------------------------------------------------------
 
+    @property
+    def _active_conn(self):
+        """The connection to use for the calling thread.
+
+        SQLite: always the single shared connection — safe because
+        check_same_thread=False plus SQLite's serialized threading mode make
+        one connection safe to share across threads (see _connect_sqlite).
+
+        MySQL: mysqlclient's DB-API threadsafety=1 means the module is
+        thread-safe but a single connection is not — concurrent use from
+        multiple threads (e.g. one per --create-issues worker thread via
+        asyncio.to_thread) risks "commands out of sync" errors. So MySQL
+        gets one connection per thread, opened lazily and cached in
+        thread-local storage; the thread that constructed this StateStore
+        (always the main/event-loop thread in this codebase) keeps reusing
+        self._conn from __init__.
+        """
+        if not self._is_mysql or threading.current_thread() is threading.main_thread():
+            return self._conn
+        if not hasattr(self._thread_local, "conn"):
+            self._thread_local.conn = _connect_mysql(
+                str(self._target), user=self._db_user, password=self._db_password, ssl=self._db_ssl,
+            )
+        return self._thread_local.conn
+
     def _ph(self, sql: str) -> str:
         if self._d.placeholder == "?":
             return sql
         return sql.replace("?", self._d.placeholder)
 
     def _exec(self, sql: str, params: tuple = ()):
-        cur = self._conn.cursor()
+        conn = self._active_conn
+        cur = conn.cursor()
         cur.execute(self._ph(sql), params)
-        self._conn.commit()
+        conn.commit()
         return cur
 
     # -- writes -----------------------------------------------------------------

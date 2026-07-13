@@ -90,9 +90,14 @@ def _create_issues_sync(
 
     Runs on a worker thread via asyncio.to_thread — Github()/get_repo()/create_issue()
     (the latter inside process_finding) are all synchronous network calls.
+
+    When dry_run is True, process_finding never touches gh_repo, so skip the
+    Github()/get_repo() calls entirely — dry-run makes zero GitHub API calls.
     """
-    gh_client = Github(auth=Auth.Token(token))
-    gh_repo = gh_client.get_repo(repo.full_name)
+    gh_repo = None
+    if not dry_run:
+        gh_client = Github(auth=Auth.Token(token))
+        gh_repo = gh_client.get_repo(repo.full_name)
     created = skipped = 0
     for finding in findings:
         outcome = process_finding(
