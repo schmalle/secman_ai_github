@@ -203,7 +203,16 @@ def _dialect_for(target: str | Path) -> _Dialect:
 
 def _connect_sqlite(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    # check_same_thread=False: the --create-issues path in orchestrator.py runs
+    # StateStore calls via asyncio.to_thread (to keep blocking GitHub API calls off
+    # the event loop), which hands them to a worker thread different from the one
+    # that opened this connection — possibly a different worker thread per
+    # concurrently-processed repo. Python's sqlite3 module links against the
+    # system SQLite library, which defaults to "serialized" threading mode
+    # (internally mutex-protected), so a single shared connection used from
+    # multiple threads is safe from corruption; check_same_thread=False only
+    # lifts Python's own same-thread guard rail on top of that.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 

@@ -82,6 +82,30 @@ def _merge_scope(
     return enumerated, unresolved
 
 
+def _create_issues_sync(
+    token: str, repo: RepoInfo, store: StateStore, owner: str, name: str,
+    findings: list, dry_run: bool,
+) -> tuple[int, int]:
+    """Blocking: mint a Github client, resolve the repo, and process each finding.
+
+    Runs on a worker thread via asyncio.to_thread — Github()/get_repo()/create_issue()
+    (the latter inside process_finding) are all synchronous network calls.
+    """
+    gh_client = Github(auth=Auth.Token(token))
+    gh_repo = gh_client.get_repo(repo.full_name)
+    created = skipped = 0
+    for finding in findings:
+        outcome = process_finding(
+            gh_repo, store, owner, name, finding,
+            seen_at=_now(), dry_run=dry_run,
+        )
+        if outcome.action in ("created", "would_create"):
+            created += 1
+        else:
+            skipped += 1
+    return created, skipped
+
+
 def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
     provider_env = resolve_provider(cfg.provider)
     if provider_env.name != "anthropic":
@@ -124,18 +148,10 @@ async def _process_repo(
                 store.replace_findings(owner, name, res.high_critical)
 
             if store is not None and cfg.create_issues and res.high_critical:
-                gh_client = Github(auth=Auth.Token(auth.token_for(repo)))
-                gh_repo = gh_client.get_repo(repo.full_name)
-                created = skipped = 0
-                for finding in res.high_critical:
-                    outcome = process_finding(
-                        gh_repo, store, owner, name, finding,
-                        seen_at=_now(), dry_run=cfg.issue_dry_run,
-                    )
-                    if outcome.action in ("created", "would_create"):
-                        created += 1
-                    else:
-                        skipped += 1
+                created, skipped = await asyncio.to_thread(
+                    _create_issues_sync, token, repo, store, owner, name,
+                    res.high_critical, cfg.issue_dry_run,
+                )
                 verb = "would create" if cfg.issue_dry_run else "created"
                 skip_verb = "would skip" if cfg.issue_dry_run else "skipped"
                 typer.echo(f"    issues: {verb} {created}, {skip_verb} {skipped}")
