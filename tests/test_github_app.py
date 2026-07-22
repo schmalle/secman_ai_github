@@ -1,11 +1,14 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from secscan.config import Filters
+from secscan.config import Filters, GithubAppConfig
 from secscan.github_app import (
+    GithubAppClient,
     RepoInfo,
     authed_clone_url,
+    fetch_last_commit,
     redact_url,
     should_include,
 )
@@ -82,3 +85,40 @@ def test_redact_url_hides_token():
     url = "https://x-access-token:ghs_secret@github.com/octo/repo.git"
     assert "ghs_secret" not in redact_url(url)
     assert "octo/repo" in redact_url(url)
+
+
+def _gh_with_commit(sha="a1b2c3d4e5f6"):
+    commit = SimpleNamespace(
+        sha=sha,
+        commit=SimpleNamespace(
+            committer=SimpleNamespace(date=datetime(2026, 7, 15, 8, 30, tzinfo=timezone.utc))
+        ),
+    )
+    return SimpleNamespace(get_repo=lambda full_name: SimpleNamespace(get_commits=lambda: [commit]))
+
+
+def test_fetch_last_commit_returns_sha_and_iso_date():
+    assert fetch_last_commit(_gh_with_commit(), "octo/repo") == ("a1b2c3d4e5f6", "2026-07-15")
+
+
+def test_fetch_last_commit_none_on_empty_repo():
+    from github import GithubException
+
+    def _boom():
+        raise GithubException(409, {"message": "Git Repository is empty."}, {})
+
+    gh = SimpleNamespace(get_repo=lambda full_name: SimpleNamespace(get_commits=_boom))
+    assert fetch_last_commit(gh, "octo/empty") is None
+
+
+def test_app_client_last_commit_uses_installation_client():
+    seen: list[int] = []
+
+    def _get_github_for_installation(installation_id):
+        seen.append(installation_id)
+        return _gh_with_commit()
+
+    client = GithubAppClient(GithubAppConfig(app_id="123", private_key="fake-pem"))
+    client._integration = SimpleNamespace(get_github_for_installation=_get_github_for_installation)
+    assert client.last_commit(_repo()) == ("a1b2c3d4e5f6", "2026-07-15")
+    assert seen == [1]  # _repo() carries installation_id=1

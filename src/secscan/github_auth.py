@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from .config import ConfigError, Filters, GithubAppConfig, GithubPatConfig, _env
-from .github_app import GithubAppClient, RepoInfo, should_include
+from .github_app import GithubAppClient, RepoInfo, fetch_last_commit, should_include
 
 
 class GithubPatClient:
@@ -49,6 +49,10 @@ class GithubPatClient:
             info = RepoInfo.from_github_repo(repo, installation_id=0)
             if should_include(info, filters, org):
                 yield info
+
+    def last_commit(self, repo: RepoInfo) -> tuple[str, str] | None:
+        """(sha, ISO date) of the repo's latest commit (same interface as GithubAppClient)."""
+        return fetch_last_commit(self.gh, repo.full_name)
 
     def lookup_repo(self, owner: str, name: str) -> RepoInfo | None:
         """Fetch one repo's metadata, or None if the token cannot see it."""

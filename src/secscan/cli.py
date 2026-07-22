@@ -218,6 +218,10 @@ def list_repos(
     include_archived: bool = typer.Option(False),
     include_forks: bool = typer.Option(False),
     max_size_mb: int = typer.Option(500),
+    last_commit: bool = typer.Option(
+        False, "--last-commit",
+        help="Append the latest default-branch commit (short SHA, date); one extra API call per repo.",
+    ),
 ) -> None:
     """Print the repositories that would be scanned (no cloning, no review)."""
     from .github_auth import build_auth
@@ -232,7 +236,11 @@ def list_repos(
             if repo.full_name in seen:
                 continue  # App entry wins; PAT duplicates are dropped
             seen.add(repo.full_name)
-            typer.echo(f"{repo.full_name}\t{repo.size_kb} KB")
+            line = f"{repo.full_name}\t{repo.size_kb} KB"
+            if last_commit:
+                lc = client.last_commit(repo)
+                line += f"\t{lc[0][:7]}\t{lc[1]}" if lc else "\t-\t-"
+            typer.echo(line)
 
 
 @app.command()

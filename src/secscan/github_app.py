@@ -66,6 +66,17 @@ def redact_url(url: str) -> str:
     return re.sub(r"https://[^@/]+@", "https://***@", url)
 
 
+def fetch_last_commit(gh, full_name: str) -> tuple[str, str] | None:
+    """(sha, ISO date) of the repo's latest default-branch commit, or None if empty/unreadable."""
+    from github import GithubException
+
+    try:
+        commit = gh.get_repo(full_name).get_commits()[0]
+    except (GithubException, IndexError):
+        return None  # empty repo (409) or inaccessible
+    return commit.sha, commit.commit.committer.date.date().isoformat()
+
+
 class GithubAppClient:
     """Thin wrapper over PyGithub's GithubIntegration for App-scoped access."""
 
@@ -89,6 +100,11 @@ class GithubAppClient:
     def token_for(self, repo: RepoInfo) -> str:
         """Token that can clone this repo (same interface as GithubPatClient)."""
         return self.installation_token(repo.installation_id)
+
+    def last_commit(self, repo: RepoInfo) -> tuple[str, str] | None:
+        """(sha, ISO date) of the repo's latest commit (same interface as GithubPatClient)."""
+        gh = self.integration.get_github_for_installation(repo.installation_id)
+        return fetch_last_commit(gh, repo.full_name)
 
     def _iter_raw_repos(self) -> Iterator[RepoInfo]:
         """Yield every repository reachable across all installations (unfiltered)."""

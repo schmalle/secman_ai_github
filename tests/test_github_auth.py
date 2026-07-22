@@ -180,6 +180,22 @@ def test_pat_client_lookup_repo_returns_info():
     assert info.installation_id == 0
 
 
+def test_pat_client_last_commit_returns_sha_and_iso_date():
+    from datetime import datetime, timezone
+
+    commit = SimpleNamespace(
+        sha="a1b2c3d4e5f6",
+        commit=SimpleNamespace(
+            committer=SimpleNamespace(date=datetime(2026, 7, 15, 8, 30, tzinfo=timezone.utc))
+        ),
+    )
+    fake_gh = SimpleNamespace(
+        get_repo=lambda full_name: SimpleNamespace(get_commits=lambda: [commit])
+    )
+    client = _pat_client_with_fake_gh(fake_gh)
+    assert client.last_commit(_repo()) == ("a1b2c3d4e5f6", "2026-07-15")
+
+
 def test_pat_client_lookup_repo_none_on_api_error():
     from github import GithubException
 
