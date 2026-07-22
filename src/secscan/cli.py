@@ -123,9 +123,16 @@ def _run_config(
     provider: str = "auto",
     timeout_s: float = 900.0,
     branch: str | None = None,
+    email_to: list[str] | None = None,
+    email_provider: str = "custom",
+    smtp_host: str | None = None,
+    smtp_port: int | None = None,
+    email_subject: str | None = None,
 ) -> RunConfig:
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
+    if no_db and email_to:
+        raise ConfigError("--no-db and --email-to cannot be combined (the report is built from the state DB)")
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
@@ -151,7 +158,21 @@ def _run_config(
         branch=branch,
         resume=resume,
         limit=limit,
+        email_to=list(email_to or []),
+        email_provider=email_provider,
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
+        email_subject=email_subject,
     )
+
+
+def _validate_email_config(cfg: RunConfig) -> None:
+    """Fail fast on SMTP misconfiguration before starting an expensive scan."""
+    if not cfg.email_to:
+        return
+    from .emailer import EmailConfig
+
+    EmailConfig.from_env(cfg.email_provider, host=cfg.smtp_host, port=cfg.smtp_port)
 
 
 @app.command()
@@ -204,6 +225,18 @@ def run(
     ),
     resume: bool = typer.Option(True, help="Skip repos already reviewed (use --no-resume to force)."),
     limit: int = typer.Option(None, help="Cap number of repos (smoke tests)."),
+    email_to: list[str] = typer.Option(
+        None, "--email-to",
+        help=(
+            "Email an HTML report when the run finds High/Critical findings; repeat "
+            "for multiple recipients. Requires SMTP_USERNAME/SMTP_PASSWORD env vars. "
+            "Cannot combine with --no-db."
+        ),
+    ),
+    email_provider: str = typer.Option("custom", help="gmail|o365|custom (presets for smtp.gmail.com / smtp.office365.com)."),
+    smtp_host: str = typer.Option(None, help="SMTP host (custom provider); defaults to SMTP_HOST."),
+    smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
+    subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
 ) -> None:
     """Enumerate, clone, and security-review reachable repositories."""
     import asyncio
@@ -217,7 +250,10 @@ def run(
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
             provider=provider, timeout_s=timeout, branch=branch,
+            email_to=email_to, email_provider=email_provider,
+            smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
         )
+        _validate_email_config(cfg)
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
@@ -317,6 +353,18 @@ def scan(
         None, "--branch",
         help="Branch to clone and review; defaults to the repo's default branch.",
     ),
+    email_to: list[str] = typer.Option(
+        None, "--email-to",
+        help=(
+            "Email an HTML report when the scan finds High/Critical findings; repeat "
+            "for multiple recipients. Requires SMTP_USERNAME/SMTP_PASSWORD env vars. "
+            "Cannot combine with --no-db."
+        ),
+    ),
+    email_provider: str = typer.Option("custom", help="gmail|o365|custom (presets for smtp.gmail.com / smtp.office365.com)."),
+    smtp_host: str = typer.Option(None, help="SMTP host (custom provider); defaults to SMTP_HOST."),
+    smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
+    subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
 ) -> None:
     """Clone one remote repository and security-review it (requires a PAT — single-repo
     scans don't enumerate App installations, so App-only credentials can't clone here)."""
@@ -332,7 +380,10 @@ def scan(
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
             provider=provider, timeout_s=timeout, branch=branch,
+            email_to=email_to, email_provider=email_provider,
+            smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
         )
+        _validate_email_config(cfg)
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
@@ -510,45 +561,23 @@ def send_report(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Email the latest scan results as an HTML report (with a plain-text part)."""
-    from datetime import datetime, timezone
-
     from .config import ConfigError
-    from .emailer import EmailConfig, build_message, send_email
-    from .report_html import (
-        build_report_html,
-        build_report_text,
-        default_subject,
-        severity_sort_key,
-    )
+    from .report_sender import send_scan_report
 
     store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
-    records = store.all_records()
-
-    findings: list[dict] = []
-    for rec in records:
-        for row in store.get_findings(rec.owner, rec.repo):
-            row["repo_full_name"] = rec.full_name
-            findings.append(row)
-    findings.sort(key=severity_sort_key)
-    total_findings = len(findings)
-    findings = findings[:max_findings]
-    if total_findings > max_findings:
-        typer.echo(f"Including {max_findings} of {total_findings} findings (raise --max-findings for more).")
-
-    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    html = build_report_html(records, findings, generated_at)
-    text = build_report_text(records, findings, generated_at)
 
     try:
-        cfg = EmailConfig.from_env(email_provider, host=smtp_host, port=smtp_port)
-        msg = build_message(cfg, email_to, subject or default_subject(records), html, text)
-        send_email(cfg, msg)
+        n_repos, n_findings = send_scan_report(
+            store, email_to,
+            provider=email_provider, host=smtp_host, port=smtp_port,
+            subject=subject, max_findings=max_findings,
+        )
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
     typer.echo(
-        f"Sent report to {', '.join(email_to)} ({len(records)} repos, {len(findings)} findings)"
+        f"Sent report to {', '.join(email_to)} ({n_repos} repos, {n_findings} findings)"
     )
 
 

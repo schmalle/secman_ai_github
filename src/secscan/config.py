@@ -89,6 +89,11 @@ class RunConfig:
     branch: str | None = None  # branch to clone/review; None = each repo's default branch
     resume: bool = True  # skip repos already marked done
     limit: int | None = None  # cap number of repos (smoke tests)
+    email_to: list[str] = field(default_factory=list)  # auto-email recipients; empty = no email
+    email_provider: str = "custom"  # gmail | o365 | custom (see emailer.py)
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    email_subject: str | None = None  # None = default findings-summary subject
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)

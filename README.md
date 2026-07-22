@@ -82,6 +82,7 @@ uv run secscan run --db-url mysql://user:pass@host:3306/secscan   # MySQL/MariaD
 uv run secscan report                     # rebuild summary.csv from state
 uv run secscan stats                      # scan statistics (table / --format csv|json)
 uv run secscan send-report --email-to sec@example.com --email-provider gmail
+uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail  # auto-email after scan
 uv run secscan push-to-secman                              # push High/Critical findings to secman
 uv run secscan push-to-secman --dry-run                    # preview only
 ```
@@ -297,6 +298,26 @@ uv run secscan send-report --email-to sec@example.com --smtp-host mail.internal 
 Delivery always uses STARTTLS on the submission port (587-style); implicit-TLS
 port 465 is not supported. Useful flags: `--subject`, `--max-findings` (default 50),
 `--db-url` to read from a shared MySQL/MariaDB backend.
+
+### Automatic notification after a scan
+
+`run` and `scan` accept the same email flags to send the report automatically at
+the end of a scan — no separate `send-report` invocation needed:
+
+```bash
+uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail
+uv run secscan scan octo/webapp --email-to a@x.com --email-to b@y.com
+```
+
+Behavior:
+
+- The email is sent **only when the run found High/Critical findings**; a clean run
+  just logs that the report was skipped.
+- SMTP configuration is validated **before** the scan starts (missing
+  `SMTP_USERNAME`/`SMTP_PASSWORD` fails fast instead of after an expensive review).
+- A delivery failure at the end is a warning, never a scan failure — results are
+  already stored, and `send-report` can resend at any time.
+- Incompatible with `--no-db` (the report is built from the state DB).
 
 ## Statistics
 
