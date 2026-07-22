@@ -48,6 +48,21 @@ def test_new_finding_creates_issue_and_records_tracking(tmp_path):
     assert tracked.issue_number == 1
 
 
+def test_custom_title_prefix_is_used(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    gh_repo = _FakeGhRepo()
+    finding = _finding()
+
+    outcome = process_finding(
+        gh_repo, store, "octo", "repo", finding,
+        seen_at="2026-07-12T00:00:00+00:00", dry_run=False, title_prefix="[acme-sec]",
+    )
+
+    assert outcome.action == "created"
+    title, _, _ = gh_repo.created[0]
+    assert title == "[acme-sec] high: SQLi (app.py)"
+
+
 def test_repeated_finding_skips_and_touches_last_seen(tmp_path):
     store = StateStore(tmp_path / "s.sqlite3")
     gh_repo = _FakeGhRepo()

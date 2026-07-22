@@ -20,8 +20,11 @@ class IssueOutcome:
     issue_url: str = ""
 
 
-def _issue_title(finding: Finding) -> str:
-    return f"[secscan] {finding.severity.value}: {finding.title} ({finding.file_path})"
+DEFAULT_TITLE_PREFIX = "[secscan]"
+
+
+def _issue_title(finding: Finding, title_prefix: str) -> str:
+    return f"{title_prefix} {finding.severity.value}: {finding.title} ({finding.file_path})"
 
 
 def _issue_body(finding: Finding, fp: str) -> str:
@@ -44,6 +47,7 @@ def process_finding(
     *,
     seen_at: str,
     dry_run: bool,
+    title_prefix: str = DEFAULT_TITLE_PREFIX,
 ) -> IssueOutcome:
     fp = fingerprint(finding)
     existing = store.find_issue(owner, repo, fp)
@@ -57,7 +61,7 @@ def process_finding(
         return IssueOutcome(action="would_create", finding_title=finding.title)
 
     issue = gh_repo.create_issue(
-        title=_issue_title(finding), body=_issue_body(finding, fp), labels=["secscan"]
+        title=_issue_title(finding, title_prefix), body=_issue_body(finding, fp), labels=["secscan"]
     )
     store.record_issue_created(owner, repo, fp, issue.number, issue.html_url, seen_at)
     return IssueOutcome(action="created", finding_title=finding.title, issue_url=issue.html_url)

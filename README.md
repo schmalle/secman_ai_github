@@ -88,7 +88,7 @@ uv run secscan push-to-secman --dry-run                    # preview only
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --keep-clones
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --issue-title-prefix --keep-clones
 --branch --no-resume --limit --targets-only`.
 
 `--branch` (on `run` and `scan`) selects the branch to clone and review. Without it,
@@ -145,11 +145,15 @@ path) tracked in the state DB — re-scanning the same repo never opens a second
 issue for a finding already tracked, it just bumps that finding's "last seen"
 timestamp. `--dry-run` previews what would be created/skipped with **zero**
 GitHub API calls and zero DB writes. Requires the DB (`--no-db --create-issues`
-is a config error).
+is a config error). `--issue-title-prefix` (default `[secscan]`) overrides the
+prefix prepended to every created issue's title — useful when running
+multiple secscan deployments/orgs against the same repos, or to distinguish
+issues from other automation.
 
 ```bash
 uv run secscan scan octo/webapp --create-issues --dry-run   # preview
 uv run secscan scan octo/webapp --create-issues             # actually open issues
+uv run secscan scan octo/webapp --create-issues --issue-title-prefix "[acme-sec]"
 ```
 
 **Prerequisite:** the GitHub App's permissions need **Issues: Write** added

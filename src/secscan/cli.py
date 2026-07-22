@@ -120,6 +120,7 @@ def _run_config(
     no_db: bool = False,
     create_issues: bool = False,
     issue_dry_run: bool = False,
+    issue_title_prefix: str = "[secscan]",
     provider: str = "auto",
     timeout_s: float = 900.0,
     branch: str | None = None,
@@ -143,6 +144,7 @@ def _run_config(
         no_db=no_db,
         create_issues=create_issues,
         issue_dry_run=issue_dry_run,
+        issue_title_prefix=issue_title_prefix,
         filters=Filters(
             include_archived=include_archived,
             include_forks=include_forks,
@@ -195,6 +197,10 @@ def run(
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    issue_title_prefix: str = typer.Option(
+        "[secscan]", "--issue-title-prefix",
+        help="Prefix prepended to every GitHub issue title created via --create-issues.",
+    ),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
@@ -249,6 +255,7 @@ def run(
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            issue_title_prefix=issue_title_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
@@ -334,6 +341,10 @@ def scan(
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    issue_title_prefix: str = typer.Option(
+        "[secscan]", "--issue-title-prefix",
+        help="Prefix prepended to every GitHub issue title created via --create-issues.",
+    ),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
         "auto",
@@ -379,6 +390,7 @@ def scan(
             False, False, 0, keep_clones, False, None,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            issue_title_prefix=issue_title_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
