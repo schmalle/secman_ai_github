@@ -26,8 +26,9 @@ treated as untrusted data (prompt-injection aware).
 - Python 3.10+ (this repo pins 3.12 via `uv`).
 - `git` on `PATH`.
 - Node + the Claude Code CLI installed and authenticated. The Claude Agent SDK shells
-  out to it. Auth via `ANTHROPIC_API_KEY`, a logged-in Claude subscription, **or** an
-  `OPENROUTER_API_KEY` (see [Choosing a provider](#choosing-a-provider---provider)).
+  out to it. Auth via `ANTHROPIC_API_KEY`, a logged-in Claude subscription, an
+  `OPENROUTER_API_KEY`, a `KIMI_API_KEY`, **or** a local GitHub Copilot proxy (see
+  [Choosing a provider](#choosing-a-provider---provider)).
 - GitHub credentials — one (or both) of:
   - A **GitHub App** installed on the target org(s)/repos with permissions
     **Contents: Read**, **Metadata: Read**. You need its App ID and a private key (`.pem`).
@@ -51,6 +52,10 @@ the environment only and never written to disk.
 | `GITHUB_TOKEN` | Personal access token — alternative or complement to the App |
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
 | `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
+| `KIMI_API_KEY` | Route reviews through Moonshot's Kimi (auto-selected when set and `OPENROUTER_API_KEY` isn't, unless `--provider usecc`) |
+| `KIMI_BASE_URL` | Override the Kimi endpoint (defaults to `https://api.moonshot.ai/anthropic`) |
+| `COPILOT_BASE_URL` | Local Anthropic-compatible GitHub Copilot proxy URL for `--provider copilot` (defaults to `http://localhost:4141`) |
+| `COPILOT_API_KEY` | Bearer token for the Copilot proxy, if it checks one (defaults to `dummy`) |
 | `SECSCAN_DB_URL` | `mysql://user:pass@host:3306/secscan` for state + findings + targets; unset = local SQLite |
 | `DB_USERNAME` | MySQL/MariaDB username (or `--db-user`); overrides any user embedded in `SECSCAN_DB_URL` |
 | `DB_PASSWORD` | MySQL/MariaDB password (or `--db-password`); overrides any password embedded in `SECSCAN_DB_URL` |
@@ -232,15 +237,22 @@ export DB_SSL=true   # only if --ssl was passed
 
 ## Choosing a provider (`--provider`)
 
-The reviewer is always Claude Code (via the Claude Agent SDK); `--provider` only
-picks which API endpoint bills the tokens. Available on `run`, `scan`, and `review`.
+The reviewer is always **Claude Code** (via the Claude Agent SDK, i.e. it always
+shells out to the `claude` CLI) — `--provider` only picks which API endpoint bills
+the tokens. Kimi (Moonshot AI) and GitHub Copilot both work here because they (or a
+local proxy in front of them) expose an Anthropic Messages-compatible endpoint that
+the Claude Code CLI can be pointed at, the same trick OpenRouter uses. There is no
+"kimi-code" or "copilot" CLI involved — Claude Code stays the one agent doing the
+review, always. Available on `run`, `scan`, and `review`.
 
 | `--provider` | Behavior |
 |---|---|
-| `auto` (default) | OpenRouter if `OPENROUTER_API_KEY` is set, else Anthropic. |
-| `anthropic` | Force direct Anthropic auth (`ANTHROPIC_API_KEY` or a logged-in Claude subscription), ignoring `OPENROUTER_API_KEY` even if set. Does **not** strip an already-exported `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` — use `usecc` if those need clearing too. |
+| `auto` (default) | OpenRouter if `OPENROUTER_API_KEY` is set, else Kimi if `KIMI_API_KEY` is set, else Anthropic (plain Claude Code). |
+| `anthropic` | Force direct Anthropic auth (`ANTHROPIC_API_KEY` or a logged-in Claude subscription), ignoring `OPENROUTER_API_KEY`/`KIMI_API_KEY` even if set. Does **not** strip an already-exported `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` — use `usecc` if those need clearing too. |
 | `openrouter` | Force OpenRouter; fails with a config error if `OPENROUTER_API_KEY` isn't set. |
-| `usecc` | Force the **locally authenticated Claude Code session**. Ignores `OPENROUTER_API_KEY` and explicitly clears any inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, so a shell that still exports OpenRouter vars (or any other Anthropic auth override) can't hijack the review — Claude Code falls back to your `claude.ai` login. |
+| `kimi` | Force Moonshot's Kimi; fails with a config error if `KIMI_API_KEY` isn't set. |
+| `copilot` | Force a local Anthropic-compatible GitHub Copilot proxy. No required key — the proxy handles GitHub auth itself. |
+| `usecc` | Force the **locally authenticated Claude Code session**. Ignores `OPENROUTER_API_KEY`/`KIMI_API_KEY` and explicitly clears any inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, so a shell that still exports those vars (or any other Anthropic auth override) can't hijack the review — Claude Code falls back to your `claude.ai` login. |
 
 ### Using OpenRouter
 
@@ -256,6 +268,53 @@ Note: with OpenRouter, `--model` takes an **OpenRouter slug** such as
 `anthropic/claude-sonnet-4.5` — aliases like `sonnet` only work against Anthropic
 directly. The Claude Code CLI still needs to be installed; only its
 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` are overridden for the review subprocess.
+
+### Using Kimi (Moonshot AI)
+
+Moonshot publishes an Anthropic Messages-compatible endpoint specifically for
+driving Claude Code with Kimi models. Set `KIMI_API_KEY` (from
+[platform.kimi.ai](https://platform.kimi.ai)) and it is auto-selected (unless
+`OPENROUTER_API_KEY` is also set); force it explicitly with `--provider kimi`.
+
+```bash
+export KIMI_API_KEY=sk-…
+uv run secscan run --provider kimi --model kimi-k2.7-code
+```
+
+`--model` takes a **Moonshot model id** (e.g. `kimi-k2.7-code`, tuned for coding
+agents) — bare Anthropic aliases like `sonnet` don't resolve against Kimi's endpoint,
+so leaving `--model` unset maps `sonnet` to a working Kimi default. Moonshot rotates
+model ids fairly often; check [platform.kimi.ai/docs/models](https://platform.kimi.ai/docs/models)
+if a model id starts getting rejected. `KIMI_BASE_URL` overrides the endpoint
+(e.g. for the China region, `https://api.moonshot.cn/anthropic`).
+
+### Using GitHub Copilot
+
+There's no first-party Anthropic-compatible endpoint from GitHub, but community
+proxies (e.g. [copilot-api](https://github.com/ericc-ch/copilot-api)) turn a GitHub
+Copilot subscription into one, so Claude Code — and therefore secscan — can drive it
+the same way as OpenRouter/Kimi. Run the proxy once and log it into your GitHub
+account:
+
+```bash
+npx copilot-api@latest start   # first run prompts a GitHub device-login
+```
+
+By default it listens on `http://localhost:4141`, matching secscan's default
+`COPILOT_BASE_URL` — nothing else to configure unless you changed the proxy's port.
+Then run with `--provider copilot`:
+
+```bash
+uv run secscan run --provider copilot --model gpt-4.1
+```
+
+`--model` must match a model the proxy is actually serving (whatever it was started
+with/authorized for) — there's no fixed alias mapping since that's entirely
+proxy-config-dependent; passing the bare `sonnet` alias prints a hint reminding you
+to set `--model` explicitly. `copilot` is never auto-selected by `--provider auto`
+(there's no dedicated required secret to detect its intended use) — always pass
+`--provider copilot` explicitly. If the proxy enforces its own bearer token, set
+`COPILOT_API_KEY`; most don't and the default `dummy` token is enough.
 
 ### Forcing your local Claude Code login (`--provider usecc`)
 

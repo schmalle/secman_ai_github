@@ -196,13 +196,17 @@ def run(
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
-    model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
+    model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5; Kimi: a Moonshot model id like kimi-k2.7-code)."),
     provider: str = typer.Option(
         "auto",
         help=(
-            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
+            "anthropic|openrouter|kimi|copilot|auto|usecc (auto: OpenRouter if "
+            "OPENROUTER_API_KEY is set, else Kimi if KIMI_API_KEY is set; "
+            "kimi: route through Moonshot's Kimi (KIMI_API_KEY); "
+            "copilot: route through a local Anthropic-compatible GitHub Copilot proxy "
+            "(COPILOT_BASE_URL, default http://localhost:4141); "
             "usecc: force the locally authenticated Claude Code session, ignoring "
-            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
+            "OPENROUTER_API_KEY/KIMI_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
         ),
     ),
     max_turns: int = typer.Option(60, help="Max agent turns per repo review."),
@@ -299,9 +303,13 @@ def review(
     provider: str = typer.Option(
         "auto",
         help=(
-            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
+            "anthropic|openrouter|kimi|copilot|auto|usecc (auto: OpenRouter if "
+            "OPENROUTER_API_KEY is set, else Kimi if KIMI_API_KEY is set; "
+            "kimi: route through Moonshot's Kimi (KIMI_API_KEY); "
+            "copilot: route through a local Anthropic-compatible GitHub Copilot proxy "
+            "(COPILOT_BASE_URL, default http://localhost:4141); "
             "usecc: force the locally authenticated Claude Code session, ignoring "
-            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
+            "OPENROUTER_API_KEY/KIMI_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
         ),
     ),
     max_turns: int = typer.Option(60),
@@ -334,13 +342,17 @@ def scan(
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
-    model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
+    model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5; Kimi: a Moonshot model id like kimi-k2.7-code)."),
     provider: str = typer.Option(
         "auto",
         help=(
-            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
+            "anthropic|openrouter|kimi|copilot|auto|usecc (auto: OpenRouter if "
+            "OPENROUTER_API_KEY is set, else Kimi if KIMI_API_KEY is set; "
+            "kimi: route through Moonshot's Kimi (KIMI_API_KEY); "
+            "copilot: route through a local Anthropic-compatible GitHub Copilot proxy "
+            "(COPILOT_BASE_URL, default http://localhost:4141); "
             "usecc: force the locally authenticated Claude Code session, ignoring "
-            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
+            "OPENROUTER_API_KEY/KIMI_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
         ),
     ),
     max_turns: int = typer.Option(60, help="Max agent turns for the review."),
