@@ -41,8 +41,8 @@ async def _mint_token(auth: AuthContext, repo: RepoInfo) -> str:
 
 
 @retry(retry=retry_if_exception_type(CloneError), **_RETRY)
-async def _clone(repo: RepoInfo, token: str, root: Path) -> Path:
-    return await clone_repo(repo, token, root)
+async def _clone(repo: RepoInfo, token: str, root: Path, branch: str | None = None) -> Path:
+    return await clone_repo(repo, token, root, branch)
 
 
 def _load_allowlist(repos_file: Path | None) -> set[str] | None:
@@ -133,7 +133,7 @@ async def _process_repo(
             token = await _mint_token(auth, repo)
             if store is not None:
                 store.mark(owner, name, Status.CLONED)
-            path = await _clone(repo, token, _clone_root(cfg))
+            path = await _clone(repo, token, _clone_root(cfg), cfg.branch)
 
             if store is not None:
                 store.mark(owner, name, Status.REVIEWING)
@@ -176,8 +176,9 @@ async def _process_repo(
                         cost_usd=res.cost_usd,
                         reviewed_at=_now(),
                     )
+                branch_note = f" ({cfg.branch})" if cfg.branch else ""
                 typer.echo(
-                    f"  ✓ {repo.full_name}: {res.critical_count} critical, "
+                    f"  ✓ {repo.full_name}{branch_note}: {res.critical_count} critical, "
                     f"{res.high_count} high (${res.cost_usd:.3f})"
                 )
         except Exception as exc:

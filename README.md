@@ -72,6 +72,7 @@ uv run secscan repo add octo/webapp       # add an explicit scan target (stored 
 uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
 uv run secscan scan octo/webapp           # clone + review one remote repo on demand
+uv run secscan scan octo/webapp --branch develop   # review a specific branch
 uv run secscan review ./some/local/repo   # review one local dir (no GitHub)
 uv run secscan run --limit 1              # full pipeline, one repo (smoke test)
 uv run secscan run --org my-org           # scope to one org
@@ -86,7 +87,12 @@ uv run secscan push-to-secman --dry-run                    # preview only
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
 --model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --keep-clones
---no-resume --limit --targets-only`.
+--branch --no-resume --limit --targets-only`.
+
+`--branch` (on `run` and `scan`) selects the branch to clone and review. Without it,
+each repo's default branch is used (whatever GitHub reports as HEAD — `main` for most
+repos). With `run`, the one branch name applies to every repo in scope; a repo that
+doesn't have that branch is recorded as a failed scan and the run continues.
 
 `--timeout` (default 900s) aborts a review if the agent produces no output for that
 long — a stall guard (e.g. a permission prompt with no interactive terminal to answer

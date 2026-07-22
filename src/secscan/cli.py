@@ -121,6 +121,7 @@ def _run_config(
     issue_dry_run: bool = False,
     provider: str = "auto",
     timeout_s: float = 900.0,
+    branch: str | None = None,
 ) -> RunConfig:
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
@@ -146,6 +147,7 @@ def _run_config(
         max_cost_usd=max_cost_usd,
         timeout_s=timeout_s,
         keep_clones=keep_clones,
+        branch=branch,
         resume=resume,
         limit=limit,
     )
@@ -190,6 +192,15 @@ def run(
     include_forks: bool = typer.Option(False, help="Include forked repos."),
     max_size_mb: int = typer.Option(500, help="Skip repos larger than this (MB); 0 disables."),
     keep_clones: bool = typer.Option(False, help="Keep clones instead of deleting them."),
+    branch: str = typer.Option(
+        None,
+        "--branch",
+        help=(
+            "Branch to clone and review; defaults to each repo's default branch. "
+            "Applies to every repo in scope — repos without this branch are recorded "
+            "as failed and the run continues."
+        ),
+    ),
     resume: bool = typer.Option(True, help="Skip repos already reviewed (use --no-resume to force)."),
     limit: int = typer.Option(None, help="Cap number of repos (smoke tests)."),
 ) -> None:
@@ -204,7 +215,7 @@ def run(
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
-            provider=provider, timeout_s=timeout,
+            provider=provider, timeout_s=timeout, branch=branch,
         )
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
@@ -301,6 +312,10 @@ def scan(
         900.0, help="Abort if the agent stalls (no output) this long, in seconds; 0 disables."
     ),
     keep_clones: bool = typer.Option(False, help="Keep the clone instead of deleting it."),
+    branch: str = typer.Option(
+        None, "--branch",
+        help="Branch to clone and review; defaults to the repo's default branch.",
+    ),
 ) -> None:
     """Clone one remote repository and security-review it (requires a PAT — single-repo
     scans don't enumerate App installations, so App-only credentials can't clone here)."""
@@ -315,7 +330,7 @@ def scan(
             False, False, 0, keep_clones, False, None,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
-            provider=provider, timeout_s=timeout,
+            provider=provider, timeout_s=timeout, branch=branch,
         )
     except ConfigError as exc:
         typer.echo(str(exc), err=True)

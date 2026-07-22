@@ -19,25 +19,32 @@ class CloneError(Exception):
     """Raised when `git clone` fails (message is token-redacted)."""
 
 
-def build_clone_command(url: str, dest: Path) -> list[str]:
-    """Build a shallow, non-interactive clone command. `url` may contain a token."""
-    return [
+def build_clone_command(url: str, dest: Path, branch: str | None = None) -> list[str]:
+    """Build a shallow, non-interactive clone command. `url` may contain a token.
+
+    Without `branch`, git clones the remote HEAD (the repo's default branch).
+    """
+    cmd = [
         "git",
         "clone",
         "--depth",
         "1",
         "--no-tags",
         "--single-branch",
-        url,
-        str(dest),
     ]
+    if branch:
+        cmd += ["--branch", branch]
+    cmd += [url, str(dest)]
+    return cmd
 
 
 def _dest_dir(root: Path, repo: RepoInfo) -> Path:
     return Path(root) / f"{repo.owner}__{repo.name}"
 
 
-async def clone_repo(repo: RepoInfo, token: str, dest_root: Path) -> Path:
+async def clone_repo(
+    repo: RepoInfo, token: str, dest_root: Path, branch: str | None = None
+) -> Path:
     """Shallow-clone `repo` into `dest_root`, returning the clone directory."""
     dest = _dest_dir(dest_root, repo)
     if dest.exists():
@@ -45,7 +52,7 @@ async def clone_repo(repo: RepoInfo, token: str, dest_root: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     url = authed_clone_url(repo.clone_url, token)
-    cmd = build_clone_command(url, dest)
+    cmd = build_clone_command(url, dest, branch)
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
     proc = await asyncio.create_subprocess_exec(
@@ -66,9 +73,12 @@ def cleanup(path: Path) -> None:
 
 
 @asynccontextmanager
-async def cloned_repo(repo: RepoInfo, token: str, dest_root: Path, keep: bool = False):
+async def cloned_repo(
+    repo: RepoInfo, token: str, dest_root: Path, keep: bool = False,
+    branch: str | None = None,
+):
     """Clone for the duration of the context; remove afterwards unless `keep`."""
-    dest = await clone_repo(repo, token, dest_root)
+    dest = await clone_repo(repo, token, dest_root, branch)
     try:
         yield dest
     finally:

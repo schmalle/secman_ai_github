@@ -86,6 +86,7 @@ class RunConfig:
     max_cost_usd: float | None = None  # per-repo abort threshold; None = no cap
     timeout_s: float = 900.0  # abort if the agent stalls (no messages) this long; 0 disables
     keep_clones: bool = False
+    branch: str | None = None  # branch to clone/review; None = each repo's default branch
     resume: bool = True  # skip repos already marked done
     limit: int | None = None  # cap number of repos (smoke tests)
 

@@ -126,7 +126,7 @@ async def test_process_repo_forwards_timeout_to_review(tmp_path, monkeypatch):
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
@@ -146,6 +146,66 @@ async def test_process_repo_forwards_timeout_to_review(tmp_path, monkeypatch):
     await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
 
     assert captured["idle_timeout_s"] == 42.0
+
+
+async def test_process_repo_forwards_branch_to_clone(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    captured = {}
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        captured["branch"] = branch
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return ReviewResult(repo_full_name=full_name)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", branch="dev")
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
+
+    assert captured["branch"] == "dev"
+
+
+async def test_process_repo_clone_defaults_to_no_branch(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    captured = {}
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        captured["branch"] = branch
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return ReviewResult(repo_full_name=full_name)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3")
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
+
+    assert captured["branch"] is None
 
 
 async def test_scan_repo_processes_single_repo_and_writes_summary(tmp_path, monkeypatch):
@@ -182,7 +242,7 @@ async def test_process_repo_skips_store_when_no_db(tmp_path, monkeypatch):
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
@@ -227,7 +287,7 @@ async def test_process_repo_creates_issues_when_enabled(tmp_path, monkeypatch):
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
@@ -285,7 +345,7 @@ async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypat
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
