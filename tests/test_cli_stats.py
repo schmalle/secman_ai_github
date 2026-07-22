@@ -79,6 +79,21 @@ def test_stats_csv_to_file(tmp_path):
     assert rows[0]["critical"] == "2"
 
 
+def test_stats_dry_run_writes_nothing(tmp_path):
+    _seed(tmp_path)
+    out = tmp_path / "stats.csv"
+    result = runner.invoke(
+        app,
+        [
+            "stats", "--output-dir", str(tmp_path), "--format", "csv",
+            "--output", str(out), "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "would write" in result.output
+    assert not out.exists()
+
+
 def test_stats_top_limits_repo_rows(tmp_path):
     _seed(tmp_path)
     result = runner.invoke(

@@ -120,6 +120,7 @@ def _run_config(
     no_db: bool = False,
     create_issues: bool = False,
     issue_dry_run: bool = False,
+    dry_run: bool = False,
     provider: str = "auto",
     timeout_s: float = 900.0,
     branch: str | None = None,
@@ -143,6 +144,7 @@ def _run_config(
         no_db=no_db,
         create_issues=create_issues,
         issue_dry_run=issue_dry_run,
+        dry_run=dry_run,
         filters=Filters(
             include_archived=include_archived,
             include_forks=include_forks,
@@ -194,7 +196,14 @@ def run(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help=(
+            "Preview mode: still clones and reviews each repo, but writes no "
+            "findings.csv/summary.csv, makes no state DB writes, opens no GitHub "
+            "issues, and sends no email — only echoes what would happen."
+        ),
+    ),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
@@ -248,7 +257,7 @@ def run(
             output_dir, concurrency, model, max_turns, max_cost_usd,
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run, dry_run=dry_run,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
@@ -309,6 +318,9 @@ def review(
     timeout: float = typer.Option(
         900.0, help="Abort if the agent stalls (no output) this long, in seconds; 0 disables."
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview mode: run the review, but write no findings.csv."
+    ),
 ) -> None:
     """Security-review a single local repository directory."""
     import asyncio
@@ -318,7 +330,7 @@ def review(
     cfg = _run_config(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, True, True, None,
-        provider=provider, timeout_s=timeout,
+        provider=provider, timeout_s=timeout, dry_run=dry_run,
     )
     asyncio.run(review_local(cfg, path))
 
@@ -333,7 +345,14 @@ def scan(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help=(
+            "Preview mode: still clones and reviews the repo, but writes no "
+            "findings.csv/summary.csv, makes no state DB writes, opens no GitHub "
+            "issues, and sends no email — only echoes what would happen."
+        ),
+    ),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
         "auto",
@@ -378,7 +397,7 @@ def scan(
             output_dir, 1, model, max_turns, max_cost_usd,
             False, False, 0, keep_clones, False, None,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run, dry_run=dry_run,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
@@ -397,12 +416,16 @@ def report(
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview the summary without writing summary.csv."),
 ) -> None:
     """Rebuild summary.csv from the state database."""
     from .findings import write_summary_csv
 
     store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
     rows = store.all_records()
+    if dry_run:
+        typer.echo(f"would write {output_dir / 'summary.csv'} ({len(rows)} repos); no file written")
+        return
     out = write_summary_csv(output_dir / "summary.csv", rows)
     typer.echo(f"Wrote {out} ({len(rows)} repos)")
 
@@ -509,6 +532,7 @@ def stats(
         help="table|csv|json. csv emits per-repo rows (totals go to stderr); json emits the full payload.",
     ),
     output: Path = typer.Option(None, "--output", help="Write csv/json to this file instead of stdout."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --output: preview without writing the file."),
     top: int = typer.Option(10, help="How many top repos (by findings) to include."),
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
@@ -539,9 +563,12 @@ def stats(
             err=True,
         )
     if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered if rendered.endswith("\n") else rendered + "\n")
-        typer.echo(f"Wrote {output}")
+        if dry_run:
+            typer.echo(f"would write {output}")
+        else:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered if rendered.endswith("\n") else rendered + "\n")
+            typer.echo(f"Wrote {output}")
     else:
         typer.echo(rendered)
 
@@ -554,6 +581,10 @@ def send_report(
     smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
     subject: str = typer.Option(None, help="Subject; defaults to a findings summary."),
     max_findings: int = typer.Option(50, help="Cap the findings included in the email."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Preview the report (still validates SMTP config) without sending it — makes zero SMTP connections.",
+    ),
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
@@ -570,15 +601,14 @@ def send_report(
         n_repos, n_findings = send_scan_report(
             store, email_to,
             provider=email_provider, host=smtp_host, port=smtp_port,
-            subject=subject, max_findings=max_findings,
+            subject=subject, max_findings=max_findings, dry_run=dry_run,
         )
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
-    typer.echo(
-        f"Sent report to {', '.join(email_to)} ({n_repos} repos, {n_findings} findings)"
-    )
+    verb = "Would send report to" if dry_run else "Sent report to"
+    typer.echo(f"{verb} {', '.join(email_to)} ({n_repos} repos, {n_findings} findings)")
 
 
 @app.command("push-to-secman")
@@ -671,12 +701,20 @@ def repo_add(
     full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help=_TARGET_DB_HELP),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview whether this would be added, without writing to the DB."
+    ),
 ) -> None:
     """Add a GitHub repository to the scan targets."""
     from datetime import datetime, timezone
 
     owner, name = _split_full_name(full_name)
     store = _open_store(output_dir, db_url)
+    if dry_run:
+        exists = (owner, name) in set(store.list_targets())
+        verb = "Already a target:" if exists else "would add"
+        typer.echo(f"{verb} {owner}/{name}")
+        return
     added = store.add_target(owner, name, datetime.now(timezone.utc).isoformat())
     typer.echo(f"{'Added' if added else 'Already a target:'} {owner}/{name}")
 
@@ -700,10 +738,20 @@ def repo_remove(
     full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help=_TARGET_DB_HELP),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview whether this would be removed, without writing to the DB."
+    ),
 ) -> None:
     """Remove a GitHub repository from the scan targets."""
     owner, name = _split_full_name(full_name)
     store = _open_store(output_dir, db_url)
+    if dry_run:
+        if (owner, name) in set(store.list_targets()):
+            typer.echo(f"would remove {owner}/{name}")
+        else:
+            typer.echo(f"Not a target: {owner}/{name}", err=True)
+            raise typer.Exit(1)
+        return
     if store.remove_target(owner, name):
         typer.echo(f"Removed {owner}/{name}")
     else:

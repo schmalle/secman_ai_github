@@ -263,6 +263,126 @@ async def test_process_repo_skips_store_when_no_db(tmp_path, monkeypatch):
     assert (tmp_path / "octo__demo" / "findings.csv").exists()
 
 
+async def test_process_repo_dry_run_writes_no_findings_csv(tmp_path, monkeypatch):
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        return tmp_path / "clone"
+
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        return ReviewResult(repo_full_name=full_name, high_critical=[finding], findings=[finding])
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", dry_run=True)
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
+
+    assert not (tmp_path / "octo__demo" / "findings.csv").exists()
+
+
+async def test_run_scan_dry_run_makes_no_csv_or_db_writes(tmp_path, monkeypatch, capsys):
+    fake_app = _FakeApp()
+    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=fake_app))
+
+    async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
+        store.record_result(
+            repo.owner, repo.name,
+            critical=1, high=0, total=1,
+            duration_s=1.0, cost_usd=0.01, reviewed_at="now",
+        )
+        return (1, 0)
+
+    monkeypatch.setattr(orch, "_process_repo", fake_process_repo)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", dry_run=True)
+    store = StateStore(cfg.state_target)
+    store.add_target("octo", "demo")
+    store.close()
+
+    await orch.run_scan(cfg, targets_only=True)
+
+    assert not (tmp_path / "summary.csv").exists()
+    assert "[dry-run] would write" in capsys.readouterr().out
+
+    verify_store = StateStore(cfg.state_target)
+    rec = verify_store.get("octo", "demo")
+    assert rec is None or rec.status != Status.DONE  # fake_process_repo's write never landed
+
+
+async def test_scan_repo_dry_run_makes_no_csv_or_db_writes(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=None, pat=None))
+
+    async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
+        store.record_result(
+            repo.owner, repo.name,
+            critical=1, high=0, total=1,
+            duration_s=1.0, cost_usd=0.01, reviewed_at="now",
+        )
+        return (1, 0)
+
+    monkeypatch.setattr(orch, "_process_repo", fake_process_repo)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", dry_run=True)
+
+    await orch.scan_repo(cfg, "octo", "demo")
+
+    assert not (tmp_path / "summary.csv").exists()
+
+    verify_store = StateStore(cfg.state_target)
+    assert verify_store.get("octo", "demo") is None
+
+
+def test_maybe_email_report_dry_run_forwards_flag_without_sending(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_send(store, email_to, **kwargs):
+        captured.update(kwargs)
+        return (1, 1)
+
+    monkeypatch.setattr(orch, "send_scan_report", fake_send)
+
+    cfg = RunConfig(output_dir=tmp_path, email_to=["sec@example.com"], dry_run=True)
+    store = StateStore(tmp_path / "secscan.sqlite3")
+
+    orch._maybe_email_report(cfg, store, 1)
+
+    assert captured["dry_run"] is True
+
+
+async def test_review_local_dry_run_writes_no_findings_csv(tmp_path, monkeypatch, capsys):
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        return ReviewResult(repo_full_name=full_name, high_critical=[finding], findings=[finding])
+
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()
+    cfg = RunConfig(output_dir=tmp_path / "out", dry_run=True)
+
+    await orch.review_local(cfg, repo_dir)
+
+    assert not (tmp_path / "out" / "local__myrepo" / "findings.csv").exists()
+    assert "[dry-run] would write" in capsys.readouterr().out
+
+
 async def test_run_scan_no_db_skips_summary_csv(tmp_path, monkeypatch, capsys):
     fake_app = _FakeApp()
     monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=fake_app))

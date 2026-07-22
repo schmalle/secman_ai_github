@@ -137,6 +137,25 @@ remote repo on demand without registering it as a target, use
 a PAT: a single-repo scan doesn't enumerate App installations, so an App-only
 credential has no installation token to clone with.
 
+## Dry-run / preview mode
+
+Every command that writes or changes something supports `--dry-run`: it makes zero
+writes (no CSV files, no state DB writes, no GitHub API calls, no SMTP connections)
+and instead echoes what would happen, prefixed `would ...` or `[dry-run] ...`.
+
+| Command | What `--dry-run` skips |
+|---|---|
+| `run` / `scan` / `review` | Still clones and reviews as usual (the expensive part), but writes no `findings.csv`/`summary.csv`, makes no state DB writes, opens no GitHub issues (see below), and sends no auto-email (`--email-to`) |
+| `report` | Skips writing `summary.csv` |
+| `stats --output <file>` | Skips writing the file (table/stdout output is unaffected — it's not a write) |
+| `send-report` | Still builds and validates the report (so SMTP misconfiguration is still caught) but makes zero SMTP connections |
+| `repo add` / `repo remove` | Skips the state DB write, previews whether it would add/remove |
+| `push-to-secman` | Already covered below — zero login/API calls |
+
+Reads used for resume/dedup (`--resume`, issue dedup, `repo list`) still reflect the
+**real** state DB, so a dry-run preview is accurate even mid-way through a series of
+real runs — it just never itself persists anything.
+
 ## Creating GitHub issues
 
 `--create-issues` (on `run`/`scan`) opens one GitHub issue per new High/Critical

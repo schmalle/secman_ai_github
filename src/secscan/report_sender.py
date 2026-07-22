@@ -29,8 +29,14 @@ def send_scan_report(
     port: int | None = None,
     subject: str | None = None,
     max_findings: int = 50,
+    dry_run: bool = False,
 ) -> tuple[int, int]:
-    """Email the latest results from `store`; returns (repos, findings included)."""
+    """Email the latest results from `store`; returns (repos, findings included).
+
+    With dry_run=True, the report is still assembled (and SMTP credentials
+    still validated) so misconfiguration is still caught, but no SMTP
+    connection is made and no email is sent.
+    """
     from . import emailer  # module attribute so tests can monkeypatch emailer.send_email
 
     records = store.all_records()
@@ -54,5 +60,8 @@ def send_scan_report(
 
     cfg = emailer.EmailConfig.from_env(provider, host=host, port=port)
     msg = emailer.build_message(cfg, email_to, subject or default_subject(records), html, text)
+    if dry_run:
+        typer.echo(f"[dry-run] would send {msg['Subject']!r} to {msg['To']}; no SMTP connection made.")
+        return len(records), len(findings)
     emailer.send_email(cfg, msg)
     return len(records), len(findings)

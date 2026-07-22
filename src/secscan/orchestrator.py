@@ -23,7 +23,7 @@ from .issues import process_finding
 from .providers import ProviderEnv, model_hint, resolve_model, resolve_provider
 from .report_sender import send_scan_report
 from .reviewer import review_repo
-from .state import StateStore, Status
+from .state import DryRunStateStore, StateStore, Status
 
 _RETRY = dict(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20), reraise=True)
 
@@ -34,6 +34,19 @@ def _now() -> str:
 
 def _clone_root(cfg: RunConfig) -> Path:
     return cfg.output_dir / "_clones"
+
+
+def _open_run_store(cfg: RunConfig) -> "StateStore | DryRunStateStore | None":
+    """Open the state store for a run/scan, honoring --no-db and --dry-run.
+
+    --dry-run wraps the real store in DryRunStateStore: reads (is_done,
+    find_issue, list_targets, ...) still see real prior state, but every
+    write this run would make becomes a no-op.
+    """
+    if cfg.no_db:
+        return None
+    store = StateStore(cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl)
+    return DryRunStateStore(store) if cfg.dry_run else store
 
 
 @retry(**_RETRY)
@@ -150,7 +163,12 @@ async def _process_repo(
             )
 
             csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
-            write_findings_csv(csv_path, repo.full_name, res.high_critical)
+            if cfg.dry_run:
+                typer.echo(
+                    f"    [dry-run] would write {len(res.high_critical)} finding(s) to {csv_path}"
+                )
+            else:
+                write_findings_csv(csv_path, repo.full_name, res.high_critical)
             if store is not None:
                 store.replace_findings(owner, name, res.high_critical)
 
@@ -195,6 +213,15 @@ async def _process_repo(
                 cleanup(path)
 
 
+def _write_summary_csv(cfg: RunConfig, store: StateStore) -> Path:
+    """Write summary.csv, or preview it under --dry-run without touching disk."""
+    path = cfg.output_dir / "summary.csv"
+    if cfg.dry_run:
+        typer.echo(f"[dry-run] would write {path} ({len(store.all_records())} repos); no file written.")
+        return path
+    return write_summary_csv(path, store.all_records())
+
+
 def _maybe_email_report(cfg: RunConfig, store: StateStore | None, run_high_critical: int) -> None:
     """Auto-email the report at run end when --email-to is set.
 
@@ -210,10 +237,11 @@ def _maybe_email_report(cfg: RunConfig, store: StateStore | None, run_high_criti
         n_repos, n_findings = send_scan_report(
             store, cfg.email_to,
             provider=cfg.email_provider, host=cfg.smtp_host, port=cfg.smtp_port,
-            subject=cfg.email_subject,
+            subject=cfg.email_subject, dry_run=cfg.dry_run,
         )
+        verb = "Would email" if cfg.dry_run else "Emailed"
         typer.echo(
-            f"Emailed report to {', '.join(cfg.email_to)} "
+            f"{verb} report to {', '.join(cfg.email_to)} "
             f"({n_repos} repos, {n_findings} findings)."
         )
     except Exception as exc:
@@ -227,9 +255,7 @@ async def run_scan(
     targets_only: bool = False,
 ) -> None:
     auth = build_auth()
-    store = None if cfg.no_db else StateStore(
-        cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
-    )
+    store = _open_run_store(cfg)
     provider_env = _resolve_provider_env(cfg)
 
     if targets_only:
@@ -274,7 +300,7 @@ async def run_scan(
         typer.echo("Done. --no-db: summary.csv skipped (no state store).")
         return
 
-    summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
+    summary = _write_summary_csv(cfg, store)
     records = store.all_records()
     total_cost = sum(r.cost_usd for r in records)
     failed = [r for r in records if r.status == Status.FAILED]
@@ -303,7 +329,10 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
     )
 
     csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"
-    write_findings_csv(csv_path, full_name, res.high_critical)
+    if cfg.dry_run:
+        typer.echo(f"  [dry-run] would write {len(res.high_critical)} finding(s) to {csv_path}")
+    else:
+        write_findings_csv(csv_path, full_name, res.high_critical)
 
     if res.error:
         typer.echo(f"  ! review error: {res.error}")
@@ -317,9 +346,7 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
 async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
     """Clone, review, and record one remote repo by name (no enumeration)."""
     auth = build_auth()
-    store = None if cfg.no_db else StateStore(
-        cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
-    )
+    store = _open_run_store(cfg)
     provider_env = _resolve_provider_env(cfg)
 
     repo = await asyncio.to_thread(resolve_target, owner, name, auth)
@@ -334,6 +361,6 @@ async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
         typer.echo("Done. --no-db: summary.csv skipped (no state store).")
         return
 
-    summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
+    summary = _write_summary_csv(cfg, store)
     typer.echo(f"Done. summary={summary}")
     _maybe_email_report(cfg, store, critical + high)

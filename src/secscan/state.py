@@ -526,3 +526,49 @@ class StateStore:
             reviewed_at=row["reviewed_at"],
             error=row["error"] or "",
         )
+
+
+class DryRunStateStore:
+    """Read-through preview wrapper: every write on the underlying StateStore
+    becomes a no-op; every read is delegated unchanged.
+
+    Used by --dry-run so a run/scan can still resolve resume/dedup state from
+    the real DB (is_done, find_issue, list_targets, ...) without persisting
+    anything from this preview run.
+    """
+
+    def __init__(self, store: StateStore):
+        self._store = store
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+    def upsert_pending(self, *args, **kwargs) -> None:
+        return None
+
+    def mark(self, *args, **kwargs) -> None:
+        return None
+
+    def record_result(self, *args, **kwargs) -> None:
+        return None
+
+    def record_failure(self, *args, **kwargs) -> None:
+        return None
+
+    def replace_findings(self, *args, **kwargs) -> None:
+        return None
+
+    def record_issue_created(self, *args, **kwargs) -> None:
+        return None
+
+    def touch_issue_seen(self, *args, **kwargs) -> None:
+        return None
+
+    def add_target(self, *args, **kwargs) -> bool:
+        return False
+
+    def remove_target(self, *args, **kwargs) -> bool:
+        return False
+
+    def close(self) -> None:
+        self._store.close()

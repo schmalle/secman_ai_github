@@ -143,3 +143,41 @@ def test_scan_email_flags_reach_config(tmp_path, monkeypatch):
     assert cfg.email_to == ["a@x.com", "b@y.com"]
     assert cfg.email_provider == "gmail"
     assert cfg.email_subject == "weekly scan"
+
+
+def test_scan_dry_run_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(
+        app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].dry_run is True
+    assert captured["cfg"].issue_dry_run is True
+
+
+def test_run_dry_run_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_run_scan(cfg, **kwargs):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(
+        app, ["run", "--output-dir", str(tmp_path), "--dry-run", "--targets-only"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].dry_run is True
+    assert captured["cfg"].issue_dry_run is True

@@ -77,6 +77,29 @@ def test_send_scan_report_custom_subject(tmp_path, monkeypatch):
     assert sent["msg"]["Subject"] == "custom subject"
 
 
+def test_send_scan_report_dry_run_makes_no_smtp_call(tmp_path, monkeypatch):
+    store = _seed(tmp_path)
+    _smtp_env(monkeypatch)
+    send_called = []
+    monkeypatch.setattr(
+        emailer, "send_email", lambda cfg, msg, smtp_factory=None: send_called.append(1)
+    )
+
+    n_repos, n_findings = send_scan_report(store, ["sec@example.com"], provider="gmail", dry_run=True)
+
+    assert (n_repos, n_findings) == (1, 2)
+    assert send_called == []
+
+
+def test_send_scan_report_dry_run_still_validates_smtp_config(tmp_path, monkeypatch):
+    store = _seed(tmp_path)
+    for var in ("SMTP_USERNAME", "SMTP_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+
+    with pytest.raises(ConfigError):
+        send_scan_report(store, ["sec@example.com"], provider="gmail", dry_run=True)
+
+
 def test_send_scan_report_missing_credentials_raises(tmp_path, monkeypatch):
     store = _seed(tmp_path)
     for var in ("SMTP_USERNAME", "SMTP_PASSWORD"):

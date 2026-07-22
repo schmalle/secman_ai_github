@@ -55,3 +55,34 @@ def test_repo_list_empty_hint(tmp_path):
     result = runner.invoke(app, ["repo", "list", *_db_args(tmp_path)])
     assert result.exit_code == 0
     assert "no targets" in result.output
+
+
+def test_repo_add_dry_run_makes_no_db_write(tmp_path):
+    result = runner.invoke(app, ["repo", "add", "octo/demo", "--dry-run", *_db_args(tmp_path)])
+    assert result.exit_code == 0
+    assert "would add octo/demo" in result.output
+
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    assert store.list_targets() == []
+
+
+def test_repo_add_dry_run_reports_existing_target(tmp_path):
+    runner.invoke(app, ["repo", "add", "octo/demo", *_db_args(tmp_path)])
+    result = runner.invoke(app, ["repo", "add", "octo/demo", "--dry-run", *_db_args(tmp_path)])
+    assert result.exit_code == 0
+    assert "Already a target" in result.output
+
+
+def test_repo_remove_dry_run_makes_no_db_write(tmp_path):
+    runner.invoke(app, ["repo", "add", "octo/demo", *_db_args(tmp_path)])
+    result = runner.invoke(app, ["repo", "remove", "octo/demo", "--dry-run", *_db_args(tmp_path)])
+    assert result.exit_code == 0
+    assert "would remove octo/demo" in result.output
+
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    assert store.list_targets() == [("octo", "demo")]
+
+
+def test_repo_remove_dry_run_missing_target_exits_nonzero(tmp_path):
+    result = runner.invoke(app, ["repo", "remove", "octo/none", "--dry-run", *_db_args(tmp_path)])
+    assert result.exit_code == 1

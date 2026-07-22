@@ -1,7 +1,7 @@
 from secscan.findings import Finding
 from secscan.state import (
-    IssueRecord, RepoRecord, StateStore, Status, _dialect_for, _mysql_connect_kwargs,
-    _MYSQL_DIALECT, _SQLITE_DIALECT,
+    DryRunStateStore, IssueRecord, RepoRecord, StateStore, Status, _dialect_for,
+    _mysql_connect_kwargs, _MYSQL_DIALECT, _SQLITE_DIALECT,
 )
 
 
@@ -383,3 +383,64 @@ def test_last_reviewed_at_picks_latest(tmp_path):
 def test_last_reviewed_at_empty_db(tmp_path):
     store = StateStore(tmp_path / "s.sqlite3")
     assert store.last_reviewed_at() == ""
+
+
+# -- DryRunStateStore ----------------------------------------------------------
+
+
+def test_dry_run_store_writes_are_noops(tmp_path):
+    real = StateStore(tmp_path / "s.sqlite3")
+    dry = DryRunStateStore(real)
+
+    dry.upsert_pending("octo", "demo")
+    dry.mark("octo", "demo", Status.DONE, critical_count=9)
+    dry.record_result(
+        "octo", "demo", critical=1, high=1, total=2,
+        duration_s=1.0, cost_usd=0.1, reviewed_at="now",
+    )
+    dry.record_failure("octo", "demo", "boom")
+    dry.replace_findings("octo", "demo", [Finding(severity="high", title="X", description="d")])
+    dry.record_issue_created("octo", "demo", "fp", 1, "https://x", "now")
+    dry.touch_issue_seen("octo", "demo", "fp", "later")
+
+    assert real.get("octo", "demo") is None
+    assert real.get_findings("octo", "demo") == []
+    assert real.find_issue("octo", "demo", "fp") is None
+
+
+def test_dry_run_store_add_remove_target_are_noops(tmp_path):
+    real = StateStore(tmp_path / "s.sqlite3")
+    dry = DryRunStateStore(real)
+
+    assert dry.add_target("octo", "demo") is False
+    assert real.list_targets() == []
+
+    real.add_target("octo", "existing")
+    assert dry.remove_target("octo", "existing") is False
+    assert real.list_targets() == [("octo", "existing")]
+
+
+def test_dry_run_store_reads_delegate_to_real_store(tmp_path):
+    real = StateStore(tmp_path / "s.sqlite3")
+    real.record_result(
+        "octo", "demo", critical=2, high=1, total=3,
+        duration_s=1.0, cost_usd=0.1, reviewed_at="now",
+    )
+    dry = DryRunStateStore(real)
+
+    assert dry.is_done("octo", "demo") is True
+    rec = dry.get("octo", "demo")
+    assert rec is not None
+    assert rec.critical_count == 2
+    assert dry.all_records() == real.all_records()
+
+
+def test_dry_run_store_close_closes_real_store(tmp_path):
+    real = StateStore(tmp_path / "s.sqlite3")
+    closed = []
+    real.close = lambda: closed.append(1)
+    dry = DryRunStateStore(real)
+
+    dry.close()
+
+    assert closed == [1]
