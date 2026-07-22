@@ -68,6 +68,7 @@ the environment only and never written to disk.
 uv sync                                   # install deps into .venv
 
 uv run secscan list-repos                 # preview what would be scanned
+uv run secscan list-repos --last-commit   # ...plus each repo's latest commit (sha, date)
 uv run secscan repo add octo/webapp       # add an explicit scan target (stored in DB)
 uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
@@ -95,6 +96,9 @@ Common flags: `--include-archived --include-forks --max-size-mb --concurrency
 each repo's default branch is used (whatever GitHub reports as HEAD — `main` for most
 repos). With `run`, the one branch name applies to every repo in scope; a repo that
 doesn't have that branch is recorded as a failed scan and the run continues.
+
+`--last-commit` (on `list-repos`) appends each repo's latest default-branch commit
+(short SHA + date) to the listing — one extra API call per repo, so it's opt-in.
 
 `--timeout` (default 900s) aborts a review if the agent produces no output for that
 long — a stall guard (e.g. a permission prompt with no interactive terminal to answer
@@ -143,7 +147,8 @@ credential has no installation token to clone with.
 finding, deduped by a content fingerprint (severity + category + title + file
 path) tracked in the state DB — re-scanning the same repo never opens a second
 issue for a finding already tracked, it just bumps that finding's "last seen"
-timestamp. `--dry-run` previews what would be created/skipped with **zero**
+timestamp. Created issues carry a `secscan` label for easy filtering.
+`--dry-run` previews what would be created/skipped with **zero**
 GitHub API calls and zero DB writes. Requires the DB (`--no-db --create-issues`
 is a config error).
 
@@ -195,7 +200,8 @@ uv sync --extra mysql
 CSV outputs are **always written** regardless of backend (dual-write); the database
 never replaces `findings.csv` / `summary.csv`. Tables: `repos` (run state),
 `findings` (High/Critical findings per repo, replaced on each review), `targets`
-(explicitly-added scan targets).
+(explicitly-added scan targets), `issue_tracking` (fingerprint → GitHub issue
+dedup for `--create-issues`, first/last-seen timestamps).
 
 To run the integration tests against a real server:
 
@@ -253,9 +259,12 @@ uv run secscan run --model anthropic/claude-sonnet-4.5
 ```
 
 Note: with OpenRouter, `--model` takes an **OpenRouter slug** such as
-`anthropic/claude-sonnet-4.5` — aliases like `sonnet` only work against Anthropic
-directly. The Claude Code CLI still needs to be installed; only its
-`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` are overridden for the review subprocess.
+`anthropic/claude-sonnet-4.5` — aliases like `opus`/`haiku` only work against
+Anthropic directly. The one exception is the default, `sonnet`: left unset, it's
+auto-mapped to an OpenRouter slug so `--provider openrouter` works out of the box
+without also requiring `--model`. The Claude Code CLI still needs to be installed;
+only its `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` are overridden for the review
+subprocess.
 
 ### Forcing your local Claude Code login (`--provider usecc`)
 
