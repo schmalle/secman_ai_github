@@ -6,6 +6,7 @@ Commands:
   list-repos  enumerate + filter only (no review) — show what would be scanned
   review      review a single local repo directory (dev/test loop, no GitHub)
   report      rebuild the aggregate summary.csv from the state DB
+  stats       print scan statistics from the state DB (table / csv / json)
   repo        manage explicitly-added scan targets (add / list / remove)
   send-report email the latest results as an HTML report (Gmail / O365 / custom SMTP)
   push-to-secman push High/Critical findings from the state DB into secman
@@ -353,6 +354,145 @@ def report(
     rows = store.all_records()
     out = write_summary_csv(output_dir / "summary.csv", rows)
     typer.echo(f"Wrote {out} ({len(rows)} repos)")
+
+
+_SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def _stats_payload(store, top: int) -> dict:
+    from datetime import datetime, timezone
+
+    from .report_html import totals
+
+    records = store.all_records()
+    t = totals(records)
+    by_severity = store.severity_counts()
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "repos": {"total": len(records), "by_status": store.status_counts()},
+        "findings": {"total": sum(by_severity.values()), "by_severity": by_severity},
+        "totals": {
+            "critical": t["critical"],
+            "high": t["high"],
+            "failed": t["failed"],
+            "cost_usd": round(t["cost"], 3),
+        },
+        "issues_tracked": store.issue_count(),
+        "last_reviewed_at": store.last_reviewed_at(),
+        "top_repos": [
+            {
+                "repo": r.full_name,
+                "status": r.status.value,
+                "critical": r.critical_count,
+                "high": r.high_count,
+                "total_findings": r.total_findings,
+                "cost_usd": round(r.cost_usd, 3),
+                "reviewed_at": r.reviewed_at,
+            }
+            for r in store.top_repos(top)
+        ],
+    }
+
+
+def _stats_table(payload: dict) -> str:
+    lines = [
+        f"secscan statistics (generated {payload['generated_at']})",
+        "",
+        f"Repos:          {payload['repos']['total']}"
+        + (
+            "  ("
+            + ", ".join(f"{k}: {v}" for k, v in sorted(payload["repos"]["by_status"].items()))
+            + ")"
+            if payload["repos"]["by_status"]
+            else ""
+        ),
+        f"Critical/High:  {payload['totals']['critical']} critical, {payload['totals']['high']} high"
+        f" ({payload['totals']['failed']} repos failed)",
+        f"Review cost:    ${payload['totals']['cost_usd']:.3f}",
+        f"Issues tracked: {payload['issues_tracked']}",
+        f"Last review:    {payload['last_reviewed_at'] or '-'}",
+        "",
+        "Stored findings by severity:",
+    ]
+    by_severity = payload["findings"]["by_severity"]
+    for sev in _SEVERITIES:
+        if sev in by_severity:
+            lines.append(f"  {sev:<9} {by_severity[sev]}")
+    for sev, n in sorted(by_severity.items()):
+        if sev not in _SEVERITIES:
+            lines.append(f"  {sev:<9} {n}")
+    if not by_severity:
+        lines.append("  (none stored)")
+    lines += ["", f"Top repos by findings (showing {len(payload['top_repos'])}):"]
+    for r in payload["top_repos"]:
+        lines.append(
+            f"  {r['repo']}: {r['critical']} critical, {r['high']} high, "
+            f"{r['total_findings']} total [{r['status']}]"
+        )
+    if not payload["top_repos"]:
+        lines.append("  (no repos recorded)")
+    return "\n".join(lines)
+
+
+def _stats_csv(payload: dict) -> str:
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=[
+            "repo", "status", "critical", "high", "total_findings", "cost_usd", "reviewed_at",
+        ],
+    )
+    writer.writeheader()
+    for row in payload["top_repos"]:
+        writer.writerow(row)
+    return buf.getvalue()
+
+
+@app.command()
+def stats(
+    format: str = typer.Option(
+        "table", "--format",
+        help="table|csv|json. csv emits per-repo rows (totals go to stderr); json emits the full payload.",
+    ),
+    output: Path = typer.Option(None, "--output", help="Write csv/json to this file instead of stdout."),
+    top: int = typer.Option(10, help="How many top repos (by findings) to include."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+) -> None:
+    """Print scan statistics from the state database (repos, findings by severity, cost)."""
+    import json
+
+    if format not in ("table", "csv", "json"):
+        raise typer.BadParameter(f"--format must be table, csv, or json (got {format!r})")
+
+    store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
+    payload = _stats_payload(store, top)
+
+    if format == "table":
+        typer.echo(_stats_table(payload))
+        return
+    if format == "json":
+        rendered = json.dumps(payload, indent=2)
+    else:
+        rendered = _stats_csv(payload)
+        t = payload["totals"]
+        typer.echo(
+            f"{payload['repos']['total']} repos, {payload['findings']['total']} findings, "
+            f"{t['critical']} critical, {t['high']} high, ${t['cost_usd']:.3f} total cost",
+            err=True,
+        )
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered if rendered.endswith("\n") else rendered + "\n")
+        typer.echo(f"Wrote {output}")
+    else:
+        typer.echo(rendered)
 
 
 @app.command("send-report")

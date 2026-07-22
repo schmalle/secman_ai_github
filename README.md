@@ -80,6 +80,7 @@ uv run secscan run --targets-only         # only scan 'repo add' targets (skip A
 uv run secscan run                        # all reachable repos + explicit targets
 uv run secscan run --db-url mysql://user:pass@host:3306/secscan   # MySQL/MariaDB state
 uv run secscan report                     # rebuild summary.csv from state
+uv run secscan stats                      # scan statistics (table / --format csv|json)
 uv run secscan send-report --email-to sec@example.com --email-provider gmail
 uv run secscan push-to-secman                              # push High/Critical findings to secman
 uv run secscan push-to-secman --dry-run                    # preview only
@@ -296,6 +297,29 @@ uv run secscan send-report --email-to sec@example.com --smtp-host mail.internal 
 Delivery always uses STARTTLS on the submission port (587-style); implicit-TLS
 port 465 is not supported. Useful flags: `--subject`, `--max-findings` (default 50),
 `--db-url` to read from a shared MySQL/MariaDB backend.
+
+## Statistics
+
+`secscan stats` summarizes everything in the state database:
+
+```bash
+uv run secscan stats                          # human-readable table
+uv run secscan stats --format json            # full payload as JSON
+uv run secscan stats --format csv --output stats.csv   # per-repo rows as CSV
+uv run secscan stats --top 25                 # include more repos in the ranking
+```
+
+Reported metrics: repos by scan status (done / failed / pending), stored findings
+broken down by severity (critical / high / medium / low / info), total critical and
+high counts, failed-repo count, total review cost, number of GitHub issues created
+(tracked for dedup), the most recent review timestamp, and the top repos ranked by
+finding count.
+
+`--format csv` writes one row per top repo (`repo,status,critical,high,
+total_findings,cost_usd,reviewed_at`); the scalar totals go to stderr so stdout
+stays clean CSV. `--format json` includes everything in one document. Reads the
+same backend as every other command (`--db-url` / `SECSCAN_DB_URL` or the local
+SQLite file in `--output-dir`).
 
 ## Output
 

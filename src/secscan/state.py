@@ -478,6 +478,40 @@ class StateStore:
         cur = self._exec("SELECT * FROM repos ORDER BY owner, repo")
         return [self._to_record(r) for r in cur.fetchall()]
 
+    # -- statistics --------------------------------------------------------------
+    # Aggregates are aliased (AS n) so rows read the same via sqlite3.Row and
+    # MySQL DictCursor.
+
+    def severity_counts(self) -> dict[str, int]:
+        """Stored findings grouped by severity (lowercased), e.g. {'critical': 2}."""
+        cur = self._exec("SELECT severity, COUNT(*) AS n FROM findings GROUP BY severity")
+        return {str(r["severity"]).lower(): r["n"] for r in cur.fetchall()}
+
+    def status_counts(self) -> dict[str, int]:
+        """Repos grouped by scan status, e.g. {'done': 5, 'failed': 1}."""
+        cur = self._exec("SELECT status, COUNT(*) AS n FROM repos GROUP BY status")
+        return {r["status"]: r["n"] for r in cur.fetchall()}
+
+    def top_repos(self, limit: int = 10) -> list[RepoRecord]:
+        """Repos ordered by total findings (then critical count) descending."""
+        cur = self._exec(
+            "SELECT * FROM repos ORDER BY total_findings DESC, critical_count DESC, "
+            "owner, repo LIMIT ?",
+            (limit,),
+        )
+        return [self._to_record(r) for r in cur.fetchall()]
+
+    def issue_count(self) -> int:
+        """Number of GitHub issues ever created (tracked for dedup)."""
+        cur = self._exec("SELECT COUNT(*) AS n FROM issue_tracking")
+        return cur.fetchone()["n"]
+
+    def last_reviewed_at(self) -> str:
+        """Most recent review timestamp (ISO strings sort lexically), '' if none."""
+        cur = self._exec("SELECT MAX(reviewed_at) AS m FROM repos WHERE reviewed_at != ''")
+        row = cur.fetchone()
+        return row["m"] or "" if row else ""
+
     @staticmethod
     def _to_record(row) -> RepoRecord:
         return RepoRecord(
