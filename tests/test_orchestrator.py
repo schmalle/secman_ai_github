@@ -126,7 +126,7 @@ async def test_process_repo_forwards_timeout_to_review(tmp_path, monkeypatch):
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
@@ -146,6 +146,66 @@ async def test_process_repo_forwards_timeout_to_review(tmp_path, monkeypatch):
     await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
 
     assert captured["idle_timeout_s"] == 42.0
+
+
+async def test_process_repo_forwards_branch_to_clone(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    captured = {}
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        captured["branch"] = branch
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return ReviewResult(repo_full_name=full_name)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", branch="dev")
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
+
+    assert captured["branch"] == "dev"
+
+
+async def test_process_repo_clone_defaults_to_no_branch(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    captured = {}
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        captured["branch"] = branch
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return ReviewResult(repo_full_name=full_name)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3")
+    store = StateStore(cfg.state_target)
+    sem = asyncio.Semaphore(1)
+    provider_env = orch.ProviderEnv(name="anthropic")
+
+    await orch._process_repo(_repo(name="demo"), object(), store, cfg, sem, provider_env)
+
+    assert captured["branch"] is None
 
 
 async def test_scan_repo_processes_single_repo_and_writes_summary(tmp_path, monkeypatch):
@@ -182,7 +242,7 @@ async def test_process_repo_skips_store_when_no_db(tmp_path, monkeypatch):
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
@@ -227,7 +287,7 @@ async def test_process_repo_creates_issues_when_enabled(tmp_path, monkeypatch):
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
@@ -285,7 +345,7 @@ async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypat
     async def fake_mint_token(auth, repo):
         return "tok"
 
-    async def fake_clone(repo, token, root):
+    async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
@@ -325,3 +385,101 @@ async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypat
     rec = store.get("octo", "demo")
     assert rec is not None
     assert rec.status.value == "done"
+
+
+# -- auto-email after scan -------------------------------------------------------
+
+
+def _email_cfg(tmp_path, **kw):
+    return RunConfig(
+        output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3",
+        email_to=["sec@example.com"], **kw,
+    )
+
+
+async def _run_targets_only(monkeypatch, cfg, per_repo_result):
+    """Run run_scan in targets-only mode with one seeded target and a fake reviewer."""
+    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=None))
+
+    async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
+        return per_repo_result
+
+    monkeypatch.setattr(orch, "_process_repo", fake_process_repo)
+
+    store = StateStore(cfg.state_target)
+    store.add_target("octo", "demo")
+    store.close()
+
+    await orch.run_scan(cfg, targets_only=True)
+
+
+async def test_run_scan_emails_when_high_critical_found(tmp_path, monkeypatch):
+    sent = {}
+
+    def fake_send(store, email_to, **kwargs):
+        sent["to"] = email_to
+        sent["kwargs"] = kwargs
+        return (1, 1)
+
+    monkeypatch.setattr(orch, "send_scan_report", fake_send)
+
+    cfg = _email_cfg(tmp_path, email_provider="gmail", email_subject="s")
+    await _run_targets_only(monkeypatch, cfg, per_repo_result=(1, 0))
+
+    assert sent["to"] == ["sec@example.com"]
+    assert sent["kwargs"]["provider"] == "gmail"
+    assert sent["kwargs"]["subject"] == "s"
+
+
+async def test_run_scan_skips_email_when_clean(tmp_path, monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr(orch, "send_scan_report", lambda *a, **kw: called.append(1))
+
+    cfg = _email_cfg(tmp_path)
+    await _run_targets_only(monkeypatch, cfg, per_repo_result=(0, 0))
+
+    assert called == []
+    assert "email report skipped" in capsys.readouterr().out
+
+
+async def test_run_scan_email_failure_does_not_fail_run(tmp_path, monkeypatch, capsys):
+    def boom(*a, **kw):
+        raise RuntimeError("smtp down")
+
+    monkeypatch.setattr(orch, "send_scan_report", boom)
+
+    cfg = _email_cfg(tmp_path)
+    await _run_targets_only(monkeypatch, cfg, per_repo_result=(0, 1))  # must not raise
+
+    captured = capsys.readouterr()
+    assert "failed to send email report" in captured.err
+    assert "smtp down" in captured.err
+
+
+async def test_run_scan_no_email_flag_never_sends(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(orch, "send_scan_report", lambda *a, **kw: called.append(1))
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3")
+    await _run_targets_only(monkeypatch, cfg, per_repo_result=(3, 3))
+
+    assert called == []
+
+
+async def test_scan_repo_emails_when_findings(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=None, pat=None))
+
+    async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
+        return (1, 2)
+
+    monkeypatch.setattr(orch, "_process_repo", fake_process_repo)
+    sent = {}
+    monkeypatch.setattr(
+        orch, "send_scan_report",
+        lambda store, email_to, **kw: sent.update(to=email_to) or (1, 3),
+    )
+
+    cfg = _email_cfg(tmp_path)
+    await orch.scan_repo(cfg, "octo", "demo")
+
+    assert sent["to"] == ["sec@example.com"]

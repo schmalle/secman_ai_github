@@ -21,6 +21,7 @@ from .github_app import RepoInfo, redact_url
 from .github_auth import AuthContext, build_auth, resolve_target
 from .issues import process_finding
 from .providers import ProviderEnv, model_hint, resolve_model, resolve_provider
+from .report_sender import send_scan_report
 from .reviewer import review_repo
 from .state import StateStore, Status
 
@@ -41,8 +42,8 @@ async def _mint_token(auth: AuthContext, repo: RepoInfo) -> str:
 
 
 @retry(retry=retry_if_exception_type(CloneError), **_RETRY)
-async def _clone(repo: RepoInfo, token: str, root: Path) -> Path:
-    return await clone_repo(repo, token, root)
+async def _clone(repo: RepoInfo, token: str, root: Path, branch: str | None = None) -> Path:
+    return await clone_repo(repo, token, root, branch)
 
 
 def _load_allowlist(repos_file: Path | None) -> set[str] | None:
@@ -125,7 +126,8 @@ def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
 async def _process_repo(
     repo: RepoInfo, auth: AuthContext, store: StateStore, cfg: RunConfig,
     sem: asyncio.Semaphore, provider_env: ProviderEnv,
-) -> None:
+) -> tuple[int, int]:
+    """Returns (critical, high) counts found for this repo; (0, 0) on failure."""
     owner, name = repo.owner, repo.name
     async with sem:
         path: Path | None = None
@@ -133,7 +135,7 @@ async def _process_repo(
             token = await _mint_token(auth, repo)
             if store is not None:
                 store.mark(owner, name, Status.CLONED)
-            path = await _clone(repo, token, _clone_root(cfg))
+            path = await _clone(repo, token, _clone_root(cfg), cfg.branch)
 
             if store is not None:
                 store.mark(owner, name, Status.REVIEWING)
@@ -165,6 +167,7 @@ async def _process_repo(
                 if store is not None:
                     store.record_failure(owner, name, res.error)
                 typer.echo(f"  ! {repo.full_name}: review error: {res.error}")
+                return (0, 0)
             else:
                 if store is not None:
                     store.record_result(
@@ -176,17 +179,45 @@ async def _process_repo(
                         cost_usd=res.cost_usd,
                         reviewed_at=_now(),
                     )
+                branch_note = f" ({cfg.branch})" if cfg.branch else ""
                 typer.echo(
-                    f"  ✓ {repo.full_name}: {res.critical_count} critical, "
+                    f"  ✓ {repo.full_name}{branch_note}: {res.critical_count} critical, "
                     f"{res.high_count} high (${res.cost_usd:.3f})"
                 )
+                return (res.critical_count, res.high_count)
         except Exception as exc:
             if store is not None:
                 store.record_failure(owner, name, redact_url(str(exc)))
             typer.echo(f"  ! {repo.full_name}: {redact_url(str(exc))}")
+            return (0, 0)
         finally:
             if path is not None and not cfg.keep_clones:
                 cleanup(path)
+
+
+def _maybe_email_report(cfg: RunConfig, store: StateStore | None, run_high_critical: int) -> None:
+    """Auto-email the report at run end when --email-to is set.
+
+    Only sends when this run found High/Critical findings; a delivery failure is a
+    warning, never a run failure (results are already stored by this point).
+    """
+    if not cfg.email_to or store is None:
+        return
+    if run_high_critical == 0:
+        typer.echo("No High/Critical findings this run; email report skipped.")
+        return
+    try:
+        n_repos, n_findings = send_scan_report(
+            store, cfg.email_to,
+            provider=cfg.email_provider, host=cfg.smtp_host, port=cfg.smtp_port,
+            subject=cfg.email_subject,
+        )
+        typer.echo(
+            f"Emailed report to {', '.join(cfg.email_to)} "
+            f"({n_repos} repos, {n_findings} findings)."
+        )
+    except Exception as exc:
+        typer.echo(f"Warning: failed to send email report: {exc}", err=True)
 
 
 async def run_scan(
@@ -235,7 +266,9 @@ async def run_scan(
     typer.echo(f"{len(repos)} in scope, {len(todo)} to review (concurrency={cfg.concurrency}).")
 
     sem = asyncio.Semaphore(cfg.concurrency)
-    await asyncio.gather(*(_process_repo(r, auth, store, cfg, sem, provider_env) for r in todo))
+    results = await asyncio.gather(
+        *(_process_repo(r, auth, store, cfg, sem, provider_env) for r in todo)
+    )
 
     if store is None:
         typer.echo("Done. --no-db: summary.csv skipped (no state store).")
@@ -249,6 +282,8 @@ async def run_scan(
         f"Done. summary={summary} | total review cost ${total_cost:.3f} | "
         f"{len(failed)} failed."
     )
+    # `if r` skips None from monkeypatched/cancelled tasks that return nothing
+    _maybe_email_report(cfg, store, sum(r[0] + r[1] for r in results if r))
 
 
 async def review_local(cfg: RunConfig, path: Path) -> None:
@@ -292,7 +327,8 @@ async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
         store.upsert_pending(owner, name)
 
     sem = asyncio.Semaphore(1)
-    await _process_repo(repo, auth, store, cfg, sem, provider_env)
+    result = await _process_repo(repo, auth, store, cfg, sem, provider_env)
+    critical, high = result or (0, 0)
 
     if store is None:
         typer.echo("Done. --no-db: summary.csv skipped (no state store).")
@@ -300,3 +336,4 @@ async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
 
     summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
     typer.echo(f"Done. summary={summary}")
+    _maybe_email_report(cfg, store, critical + high)

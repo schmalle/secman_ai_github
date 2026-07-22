@@ -6,6 +6,7 @@ Commands:
   list-repos  enumerate + filter only (no review) — show what would be scanned
   review      review a single local repo directory (dev/test loop, no GitHub)
   report      rebuild the aggregate summary.csv from the state DB
+  stats       print scan statistics from the state DB (table / csv / json)
   repo        manage explicitly-added scan targets (add / list / remove)
   send-report email the latest results as an HTML report (Gmail / O365 / custom SMTP)
   push-to-secman push High/Critical findings from the state DB into secman
@@ -121,9 +122,17 @@ def _run_config(
     issue_dry_run: bool = False,
     provider: str = "auto",
     timeout_s: float = 900.0,
+    branch: str | None = None,
+    email_to: list[str] | None = None,
+    email_provider: str = "custom",
+    smtp_host: str | None = None,
+    smtp_port: int | None = None,
+    email_subject: str | None = None,
 ) -> RunConfig:
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
+    if no_db and email_to:
+        raise ConfigError("--no-db and --email-to cannot be combined (the report is built from the state DB)")
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
@@ -146,9 +155,24 @@ def _run_config(
         max_cost_usd=max_cost_usd,
         timeout_s=timeout_s,
         keep_clones=keep_clones,
+        branch=branch,
         resume=resume,
         limit=limit,
+        email_to=list(email_to or []),
+        email_provider=email_provider,
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
+        email_subject=email_subject,
     )
+
+
+def _validate_email_config(cfg: RunConfig) -> None:
+    """Fail fast on SMTP misconfiguration before starting an expensive scan."""
+    if not cfg.email_to:
+        return
+    from .emailer import EmailConfig
+
+    EmailConfig.from_env(cfg.email_provider, host=cfg.smtp_host, port=cfg.smtp_port)
 
 
 @app.command()
@@ -190,8 +214,29 @@ def run(
     include_forks: bool = typer.Option(False, help="Include forked repos."),
     max_size_mb: int = typer.Option(500, help="Skip repos larger than this (MB); 0 disables."),
     keep_clones: bool = typer.Option(False, help="Keep clones instead of deleting them."),
+    branch: str = typer.Option(
+        None,
+        "--branch",
+        help=(
+            "Branch to clone and review; defaults to each repo's default branch. "
+            "Applies to every repo in scope — repos without this branch are recorded "
+            "as failed and the run continues."
+        ),
+    ),
     resume: bool = typer.Option(True, help="Skip repos already reviewed (use --no-resume to force)."),
     limit: int = typer.Option(None, help="Cap number of repos (smoke tests)."),
+    email_to: list[str] = typer.Option(
+        None, "--email-to",
+        help=(
+            "Email an HTML report when the run finds High/Critical findings; repeat "
+            "for multiple recipients. Requires SMTP_USERNAME/SMTP_PASSWORD env vars. "
+            "Cannot combine with --no-db."
+        ),
+    ),
+    email_provider: str = typer.Option("custom", help="gmail|o365|custom (presets for smtp.gmail.com / smtp.office365.com)."),
+    smtp_host: str = typer.Option(None, help="SMTP host (custom provider); defaults to SMTP_HOST."),
+    smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
+    subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
 ) -> None:
     """Enumerate, clone, and security-review reachable repositories."""
     import asyncio
@@ -204,8 +249,11 @@ def run(
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
-            provider=provider, timeout_s=timeout,
+            provider=provider, timeout_s=timeout, branch=branch,
+            email_to=email_to, email_provider=email_provider,
+            smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
         )
+        _validate_email_config(cfg)
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
@@ -301,6 +349,22 @@ def scan(
         900.0, help="Abort if the agent stalls (no output) this long, in seconds; 0 disables."
     ),
     keep_clones: bool = typer.Option(False, help="Keep the clone instead of deleting it."),
+    branch: str = typer.Option(
+        None, "--branch",
+        help="Branch to clone and review; defaults to the repo's default branch.",
+    ),
+    email_to: list[str] = typer.Option(
+        None, "--email-to",
+        help=(
+            "Email an HTML report when the scan finds High/Critical findings; repeat "
+            "for multiple recipients. Requires SMTP_USERNAME/SMTP_PASSWORD env vars. "
+            "Cannot combine with --no-db."
+        ),
+    ),
+    email_provider: str = typer.Option("custom", help="gmail|o365|custom (presets for smtp.gmail.com / smtp.office365.com)."),
+    smtp_host: str = typer.Option(None, help="SMTP host (custom provider); defaults to SMTP_HOST."),
+    smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
+    subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
 ) -> None:
     """Clone one remote repository and security-review it (requires a PAT — single-repo
     scans don't enumerate App installations, so App-only credentials can't clone here)."""
@@ -315,8 +379,11 @@ def scan(
             False, False, 0, keep_clones, False, None,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
-            provider=provider, timeout_s=timeout,
+            provider=provider, timeout_s=timeout, branch=branch,
+            email_to=email_to, email_provider=email_provider,
+            smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
         )
+        _validate_email_config(cfg)
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
@@ -340,6 +407,145 @@ def report(
     typer.echo(f"Wrote {out} ({len(rows)} repos)")
 
 
+_SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def _stats_payload(store, top: int) -> dict:
+    from datetime import datetime, timezone
+
+    from .report_html import totals
+
+    records = store.all_records()
+    t = totals(records)
+    by_severity = store.severity_counts()
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "repos": {"total": len(records), "by_status": store.status_counts()},
+        "findings": {"total": sum(by_severity.values()), "by_severity": by_severity},
+        "totals": {
+            "critical": t["critical"],
+            "high": t["high"],
+            "failed": t["failed"],
+            "cost_usd": round(t["cost"], 3),
+        },
+        "issues_tracked": store.issue_count(),
+        "last_reviewed_at": store.last_reviewed_at(),
+        "top_repos": [
+            {
+                "repo": r.full_name,
+                "status": r.status.value,
+                "critical": r.critical_count,
+                "high": r.high_count,
+                "total_findings": r.total_findings,
+                "cost_usd": round(r.cost_usd, 3),
+                "reviewed_at": r.reviewed_at,
+            }
+            for r in store.top_repos(top)
+        ],
+    }
+
+
+def _stats_table(payload: dict) -> str:
+    lines = [
+        f"secscan statistics (generated {payload['generated_at']})",
+        "",
+        f"Repos:          {payload['repos']['total']}"
+        + (
+            "  ("
+            + ", ".join(f"{k}: {v}" for k, v in sorted(payload["repos"]["by_status"].items()))
+            + ")"
+            if payload["repos"]["by_status"]
+            else ""
+        ),
+        f"Critical/High:  {payload['totals']['critical']} critical, {payload['totals']['high']} high"
+        f" ({payload['totals']['failed']} repos failed)",
+        f"Review cost:    ${payload['totals']['cost_usd']:.3f}",
+        f"Issues tracked: {payload['issues_tracked']}",
+        f"Last review:    {payload['last_reviewed_at'] or '-'}",
+        "",
+        "Stored findings by severity:",
+    ]
+    by_severity = payload["findings"]["by_severity"]
+    for sev in _SEVERITIES:
+        if sev in by_severity:
+            lines.append(f"  {sev:<9} {by_severity[sev]}")
+    for sev, n in sorted(by_severity.items()):
+        if sev not in _SEVERITIES:
+            lines.append(f"  {sev:<9} {n}")
+    if not by_severity:
+        lines.append("  (none stored)")
+    lines += ["", f"Top repos by findings (showing {len(payload['top_repos'])}):"]
+    for r in payload["top_repos"]:
+        lines.append(
+            f"  {r['repo']}: {r['critical']} critical, {r['high']} high, "
+            f"{r['total_findings']} total [{r['status']}]"
+        )
+    if not payload["top_repos"]:
+        lines.append("  (no repos recorded)")
+    return "\n".join(lines)
+
+
+def _stats_csv(payload: dict) -> str:
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=[
+            "repo", "status", "critical", "high", "total_findings", "cost_usd", "reviewed_at",
+        ],
+    )
+    writer.writeheader()
+    for row in payload["top_repos"]:
+        writer.writerow(row)
+    return buf.getvalue()
+
+
+@app.command()
+def stats(
+    format: str = typer.Option(
+        "table", "--format",
+        help="table|csv|json. csv emits per-repo rows (totals go to stderr); json emits the full payload.",
+    ),
+    output: Path = typer.Option(None, "--output", help="Write csv/json to this file instead of stdout."),
+    top: int = typer.Option(10, help="How many top repos (by findings) to include."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+) -> None:
+    """Print scan statistics from the state database (repos, findings by severity, cost)."""
+    import json
+
+    if format not in ("table", "csv", "json"):
+        raise typer.BadParameter(f"--format must be table, csv, or json (got {format!r})")
+
+    store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
+    payload = _stats_payload(store, top)
+
+    if format == "table":
+        typer.echo(_stats_table(payload))
+        return
+    if format == "json":
+        rendered = json.dumps(payload, indent=2)
+    else:
+        rendered = _stats_csv(payload)
+        t = payload["totals"]
+        typer.echo(
+            f"{payload['repos']['total']} repos, {payload['findings']['total']} findings, "
+            f"{t['critical']} critical, {t['high']} high, ${t['cost_usd']:.3f} total cost",
+            err=True,
+        )
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered if rendered.endswith("\n") else rendered + "\n")
+        typer.echo(f"Wrote {output}")
+    else:
+        typer.echo(rendered)
+
+
 @app.command("send-report")
 def send_report(
     email_to: list[str] = typer.Option(..., "--email-to", help="Recipient address; repeat for multiple."),
@@ -355,45 +561,23 @@ def send_report(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Email the latest scan results as an HTML report (with a plain-text part)."""
-    from datetime import datetime, timezone
-
     from .config import ConfigError
-    from .emailer import EmailConfig, build_message, send_email
-    from .report_html import (
-        build_report_html,
-        build_report_text,
-        default_subject,
-        severity_sort_key,
-    )
+    from .report_sender import send_scan_report
 
     store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
-    records = store.all_records()
-
-    findings: list[dict] = []
-    for rec in records:
-        for row in store.get_findings(rec.owner, rec.repo):
-            row["repo_full_name"] = rec.full_name
-            findings.append(row)
-    findings.sort(key=severity_sort_key)
-    total_findings = len(findings)
-    findings = findings[:max_findings]
-    if total_findings > max_findings:
-        typer.echo(f"Including {max_findings} of {total_findings} findings (raise --max-findings for more).")
-
-    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    html = build_report_html(records, findings, generated_at)
-    text = build_report_text(records, findings, generated_at)
 
     try:
-        cfg = EmailConfig.from_env(email_provider, host=smtp_host, port=smtp_port)
-        msg = build_message(cfg, email_to, subject or default_subject(records), html, text)
-        send_email(cfg, msg)
+        n_repos, n_findings = send_scan_report(
+            store, email_to,
+            provider=email_provider, host=smtp_host, port=smtp_port,
+            subject=subject, max_findings=max_findings,
+        )
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
     typer.echo(
-        f"Sent report to {', '.join(email_to)} ({len(records)} repos, {len(findings)} findings)"
+        f"Sent report to {', '.join(email_to)} ({n_repos} repos, {n_findings} findings)"
     )
 
 

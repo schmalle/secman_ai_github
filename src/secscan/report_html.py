@@ -63,7 +63,8 @@ def _truncate(text: str, limit: int = _DESCRIPTION_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _totals(records: Iterable[RepoRecord]) -> dict:
+def totals(records: Iterable[RepoRecord]) -> dict:
+    """Cross-repo sums used by the report header and `secscan stats`."""
     records = list(records)
     return {
         "repos": len(records),
@@ -72,6 +73,9 @@ def _totals(records: Iterable[RepoRecord]) -> dict:
         "cost": sum(r.cost_usd for r in records),
         "failed": sum(1 for r in records if r.status.value == "failed"),
     }
+
+
+_totals = totals
 
 
 def default_subject(records: list[RepoRecord]) -> str:

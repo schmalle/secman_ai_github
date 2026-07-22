@@ -72,6 +72,7 @@ uv run secscan repo add octo/webapp       # add an explicit scan target (stored 
 uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
 uv run secscan scan octo/webapp           # clone + review one remote repo on demand
+uv run secscan scan octo/webapp --branch develop   # review a specific branch
 uv run secscan review ./some/local/repo   # review one local dir (no GitHub)
 uv run secscan run --limit 1              # full pipeline, one repo (smoke test)
 uv run secscan run --org my-org           # scope to one org
@@ -79,14 +80,21 @@ uv run secscan run --targets-only         # only scan 'repo add' targets (skip A
 uv run secscan run                        # all reachable repos + explicit targets
 uv run secscan run --db-url mysql://user:pass@host:3306/secscan   # MySQL/MariaDB state
 uv run secscan report                     # rebuild summary.csv from state
+uv run secscan stats                      # scan statistics (table / --format csv|json)
 uv run secscan send-report --email-to sec@example.com --email-provider gmail
+uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail  # auto-email after scan
 uv run secscan push-to-secman                              # push High/Critical findings to secman
 uv run secscan push-to-secman --dry-run                    # preview only
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
 --model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --keep-clones
---no-resume --limit --targets-only`.
+--branch --no-resume --limit --targets-only`.
+
+`--branch` (on `run` and `scan`) selects the branch to clone and review. Without it,
+each repo's default branch is used (whatever GitHub reports as HEAD — `main` for most
+repos). With `run`, the one branch name applies to every repo in scope; a repo that
+doesn't have that branch is recorded as a failed scan and the run continues.
 
 `--timeout` (default 900s) aborts a review if the agent produces no output for that
 long — a stall guard (e.g. a permission prompt with no interactive terminal to answer
@@ -290,6 +298,49 @@ uv run secscan send-report --email-to sec@example.com --smtp-host mail.internal 
 Delivery always uses STARTTLS on the submission port (587-style); implicit-TLS
 port 465 is not supported. Useful flags: `--subject`, `--max-findings` (default 50),
 `--db-url` to read from a shared MySQL/MariaDB backend.
+
+### Automatic notification after a scan
+
+`run` and `scan` accept the same email flags to send the report automatically at
+the end of a scan — no separate `send-report` invocation needed:
+
+```bash
+uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail
+uv run secscan scan octo/webapp --email-to a@x.com --email-to b@y.com
+```
+
+Behavior:
+
+- The email is sent **only when the run found High/Critical findings**; a clean run
+  just logs that the report was skipped.
+- SMTP configuration is validated **before** the scan starts (missing
+  `SMTP_USERNAME`/`SMTP_PASSWORD` fails fast instead of after an expensive review).
+- A delivery failure at the end is a warning, never a scan failure — results are
+  already stored, and `send-report` can resend at any time.
+- Incompatible with `--no-db` (the report is built from the state DB).
+
+## Statistics
+
+`secscan stats` summarizes everything in the state database:
+
+```bash
+uv run secscan stats                          # human-readable table
+uv run secscan stats --format json            # full payload as JSON
+uv run secscan stats --format csv --output stats.csv   # per-repo rows as CSV
+uv run secscan stats --top 25                 # include more repos in the ranking
+```
+
+Reported metrics: repos by scan status (done / failed / pending), stored findings
+broken down by severity (critical / high / medium / low / info), total critical and
+high counts, failed-repo count, total review cost, number of GitHub issues created
+(tracked for dedup), the most recent review timestamp, and the top repos ranked by
+finding count.
+
+`--format csv` writes one row per top repo (`repo,status,critical,high,
+total_findings,cost_usd,reviewed_at`); the scalar totals go to stderr so stdout
+stays clean CSV. `--format json` includes everything in one document. Reads the
+same backend as every other command (`--db-url` / `SECSCAN_DB_URL` or the local
+SQLite file in `--output-dir`).
 
 ## Output
 
