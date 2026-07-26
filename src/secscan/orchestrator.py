@@ -85,7 +85,7 @@ def _merge_scope(
 
 def _create_issues_sync(
     token: str, repo: RepoInfo, store: StateStore, owner: str, name: str,
-    findings: list, dry_run: bool,
+    findings: list, dry_run: bool, prefix: str,
 ) -> tuple[int, int]:
     """Blocking: mint a Github client, resolve the repo, and process each finding.
 
@@ -103,7 +103,7 @@ def _create_issues_sync(
     for finding in findings:
         outcome = process_finding(
             gh_repo, store, owner, name, finding,
-            seen_at=_now(), dry_run=dry_run,
+            seen_at=_now(), dry_run=dry_run, prefix=prefix,
         )
         if outcome.action in ("created", "would_create"):
             created += 1
@@ -157,7 +157,7 @@ async def _process_repo(
             if store is not None and cfg.create_issues and res.high_critical:
                 created, skipped = await asyncio.to_thread(
                     _create_issues_sync, token, repo, store, owner, name,
-                    res.high_critical, cfg.issue_dry_run,
+                    res.high_critical, cfg.issue_dry_run, cfg.issue_prefix,
                 )
                 verb = "would create" if cfg.issue_dry_run else "created"
                 skip_verb = "would skip" if cfg.issue_dry_run else "skipped"

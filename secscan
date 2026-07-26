@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Thin wrapper: run secscan through uv from the project root, passing through
+# every command line argument unchanged.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")"
+exec uv run secscan "$@"

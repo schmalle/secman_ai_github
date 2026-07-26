@@ -32,6 +32,12 @@ repo_app = typer.Typer(
 )
 app.add_typer(repo_app, name="repo")
 
+stats_app = typer.Typer(
+    add_completion=False,
+    help="Scan statistics from the state database.",
+)
+app.add_typer(stats_app, name="stats")
+
 
 def _resolve_db_url(db_url: str | None) -> str | None:
     import os
@@ -120,6 +126,7 @@ def _run_config(
     no_db: bool = False,
     create_issues: bool = False,
     issue_dry_run: bool = False,
+    issue_prefix: str = "secscan:",
     provider: str = "auto",
     timeout_s: float = 900.0,
     branch: str | None = None,
@@ -143,6 +150,7 @@ def _run_config(
         no_db=no_db,
         create_issues=create_issues,
         issue_dry_run=issue_dry_run,
+        issue_prefix=issue_prefix.strip(),
         filters=Filters(
             include_archived=include_archived,
             include_forks=include_forks,
@@ -195,6 +203,7 @@ def run(
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
@@ -249,6 +258,7 @@ def run(
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
@@ -334,6 +344,7 @@ def scan(
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
         "auto",
@@ -379,6 +390,7 @@ def scan(
             False, False, 0, keep_clones, False, None,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
@@ -502,8 +514,9 @@ def _stats_csv(payload: dict) -> str:
     return buf.getvalue()
 
 
-@app.command()
+@stats_app.callback(invoke_without_command=True)
 def stats(
+    ctx: typer.Context,
     format: str = typer.Option(
         "table", "--format",
         help="table|csv|json. csv emits per-repo rows (totals go to stderr); json emits the full payload.",
@@ -518,6 +531,9 @@ def stats(
 ) -> None:
     """Print scan statistics from the state database (repos, findings by severity, cost)."""
     import json
+
+    if ctx.invoked_subcommand is not None:
+        return
 
     if format not in ("table", "csv", "json"):
         raise typer.BadParameter(f"--format must be table, csv, or json (got {format!r})")
@@ -544,6 +560,68 @@ def stats(
         typer.echo(f"Wrote {output}")
     else:
         typer.echo(rendered)
+
+
+def _delete_generated_csvs(output_dir: Path) -> int:
+    """Remove summary.csv and every per-repo findings.csv; returns the file count.
+
+    Only files this tool generated are unlinked (never a recursive directory
+    delete); a per-repo directory is removed only if it ends up empty.
+    """
+    removed = 0
+    summary = output_dir / "summary.csv"
+    if summary.is_file():
+        summary.unlink()
+        removed += 1
+    for csv_path in sorted(output_dir.glob("*__*/findings.csv")):
+        csv_path.unlink()
+        removed += 1
+        try:
+            csv_path.parent.rmdir()
+        except OSError:
+            pass  # other files live there; leave the directory alone
+    return removed
+
+
+@stats_app.command("reset")
+def stats_reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    include_csv: bool = typer.Option(False, "--include-csv", help="Also delete summary.csv and every per-repo findings.csv under --output-dir."),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+) -> None:
+    """Delete all stored statistics (scan history and findings) from the state database.
+
+    Registered scan targets and GitHub issue tracking are kept — clearing issue
+    tracking would make the next --create-issues run re-open issues that already
+    exist on GitHub.
+    """
+    store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
+    n_repos = len(store.all_records())
+    n_findings = sum(store.severity_counts().values())
+
+    if not yes:
+        # Name the SQLite file, but never echo a MySQL URL back — it can embed credentials.
+        label = (
+            "the configured MySQL/MariaDB database"
+            if _resolve_db_url(db_url)
+            else str(output_dir / "secscan.sqlite3")
+        )
+        typer.confirm(
+            f"Delete {n_repos} repo records and {n_findings} findings from {label}?",
+            abort=True,
+        )
+
+    repos_deleted, findings_deleted = store.clear_stats()
+    typer.echo(
+        f"Deleted {repos_deleted} repo records and {findings_deleted} findings "
+        f"(targets and issue tracking kept)."
+    )
+    if include_csv:
+        typer.echo(f"Deleted {_delete_generated_csvs(output_dir)} CSV files under {output_dir}")
 
 
 @app.command("send-report")

@@ -399,6 +399,21 @@ class StateStore:
             )
         self._conn.commit()
 
+    def clear_stats(self) -> tuple[int, int]:
+        """Delete all scan history and stored findings; returns (repos, findings) deleted.
+
+        Registered targets and GitHub issue tracking are deliberately left alone:
+        wiping issue_tracking would make the next --create-issues run re-open issues
+        that already exist on GitHub.
+        """
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM findings")
+        findings_deleted = cur.rowcount
+        cur.execute("DELETE FROM repos")
+        repos_deleted = cur.rowcount
+        self._conn.commit()
+        return (max(repos_deleted, 0), max(findings_deleted, 0))
+
     def get_findings(self, owner: str, repo: str) -> list[dict]:
         cur = self._exec(
             "SELECT * FROM findings WHERE owner = ? AND repo = ? ORDER BY id",

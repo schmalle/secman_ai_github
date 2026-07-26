@@ -17,6 +17,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
+    ToolUseBlock,
     query,
 )
 
@@ -24,8 +25,10 @@ from .findings import Finding, filter_high_critical, parse_findings
 from .prompts import SYSTEM_PROMPT, task_prompt
 
 # Read-only tool allowlist. Everything else is denied (defense in depth + permission_mode).
+# Agent/Task must stay denied: left open, the review model spawns sub-agents to explore
+# the repo, which isn't bounded by max_turns the same way and made runs unpredictably slow.
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob"]
-DENIED_TOOLS = ["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"]
+DENIED_TOOLS = ["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task"]
 
 # Default guard against a stalled agent (e.g. waiting on a permission prompt with
 # no interactive terminal to answer it) hanging the review forever. This bounds
@@ -111,9 +114,17 @@ async def review_repo(
     if idle_timeout_s:
         messages = _iter_with_idle_timeout(messages, idle_timeout_s)
 
+    turn_count = 0
     try:
         async for message in messages:
             if isinstance(message, AssistantMessage):
+                turn_count += 1
+                tool_names = [b.name for b in message.content if isinstance(b, ToolUseBlock)]
+                print(
+                    f"    [{repo_full_name}] turn {turn_count}/{max_turns}: "
+                    f"{', '.join(tool_names) if tool_names else 'thinking'}",
+                    flush=True,
+                )
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         text_chunks.append(block.text)

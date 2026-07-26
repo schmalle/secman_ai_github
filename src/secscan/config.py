@@ -78,6 +78,7 @@ class RunConfig:
     no_db: bool = False  # skip all DB storage; findings.csv still written, summary.csv skipped
     create_issues: bool = False  # open one GitHub issue per new High/Critical finding
     issue_dry_run: bool = False  # preview issue creation without any GitHub API calls or DB writes
+    issue_prefix: str = "secscan:"  # prepended to issue titles; empty string means no prefix
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     model: str = "sonnet"
