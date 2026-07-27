@@ -38,7 +38,7 @@ def test_new_finding_creates_issue_and_records_tracking(tmp_path):
     assert outcome.action == "created"
     assert len(gh_repo.created) == 1
     title, body, labels = gh_repo.created[0]
-    assert title == "[secscan] high: SQLi (app.py)"
+    assert title == "secscan: high: SQLi (app.py)"
     assert labels == ["secscan"]
     assert "Unsanitized input" in body
     assert "Use parameterized queries" in body
@@ -46,6 +46,30 @@ def test_new_finding_creates_issue_and_records_tracking(tmp_path):
     tracked = store.find_issue("octo", "repo", fingerprint(finding))
     assert tracked is not None
     assert tracked.issue_number == 1
+
+
+def test_custom_prefix_is_used_verbatim(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    gh_repo = _FakeGhRepo()
+
+    process_finding(
+        gh_repo, store, "octo", "repo", _finding(), seen_at="2026-07-12T00:00:00+00:00",
+        dry_run=False, prefix="[acme]",
+    )
+
+    assert gh_repo.created[0][0] == "[acme] high: SQLi (app.py)"
+
+
+def test_empty_prefix_leaves_no_leading_space(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    gh_repo = _FakeGhRepo()
+
+    process_finding(
+        gh_repo, store, "octo", "repo", _finding(), seen_at="2026-07-12T00:00:00+00:00",
+        dry_run=False, prefix="",
+    )
+
+    assert gh_repo.created[0][0] == "high: SQLi (app.py)"
 
 
 def test_repeated_finding_skips_and_touches_last_seen(tmp_path):

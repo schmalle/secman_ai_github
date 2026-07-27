@@ -68,6 +68,7 @@ the environment only and never written to disk.
 uv sync                                   # install deps into .venv
 
 uv run secscan list-repos                 # preview what would be scanned
+uv run secscan list-repos --last-commit   # …and each repo's latest commit
 uv run secscan repo add octo/webapp       # add an explicit scan target (stored in DB)
 uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
@@ -81,6 +82,7 @@ uv run secscan run                        # all reachable repos + explicit targe
 uv run secscan run --db-url mysql://user:pass@host:3306/secscan   # MySQL/MariaDB state
 uv run secscan report                     # rebuild summary.csv from state
 uv run secscan stats                      # scan statistics (table / --format csv|json)
+uv run secscan stats reset                # delete all stored stats (history + findings)
 uv run secscan send-report --email-to sec@example.com --email-provider gmail
 uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail  # auto-email after scan
 uv run secscan push-to-secman                              # push High/Critical findings to secman
@@ -88,8 +90,14 @@ uv run secscan push-to-secman --dry-run                    # preview only
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --keep-clones
---branch --no-resume --limit --targets-only`.
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --issue-prefix --keep-clones
+--branch --no-resume --limit --targets-only --repos-file`.
+
+`list-repos` prints one tab-separated line per repo (`owner/name`, size in KB).
+`--last-commit` appends the latest commit on the branch GitHub reports as HEAD
+(short SHA and `YYYY-MM-DD` date, or `-` `-` if the repo is empty or unreadable)
+— it costs one
+extra API call per repo, so it is off by default.
 
 `--branch` (on `run` and `scan`) selects the branch to clone and review. Without it,
 each repo's default branch is used (whatever GitHub reports as HEAD — `main` for most
@@ -152,6 +160,19 @@ uv run secscan scan octo/webapp --create-issues --dry-run   # preview
 uv run secscan scan octo/webapp --create-issues             # actually open issues
 ```
 
+Issue titles are `<prefix> <severity>: <title> (<file>)` — e.g.
+`secscan: high: SQL injection in user lookup (app/db.py)`. `--issue-prefix` changes
+the prefix (default `secscan:`); pass an empty string for no prefix at all:
+
+```bash
+uv run secscan scan octo/webapp --create-issues --issue-prefix '[acme]'
+# -> "[acme] high: SQL injection in user lookup (app/db.py)"
+```
+
+The prefix is cosmetic: dedup keys off the finding fingerprint, not the title, so
+changing it between runs never re-opens issues that already exist. Every issue also
+gets the `secscan` label, which is not configurable.
+
 **Prerequisite:** the GitHub App's permissions need **Issues: Write** added
 (alongside the existing Contents: Read, Metadata: Read) — existing installations
 require re-approval after this permission is added to the App manifest. PAT mode
@@ -195,7 +216,9 @@ uv sync --extra mysql
 CSV outputs are **always written** regardless of backend (dual-write); the database
 never replaces `findings.csv` / `summary.csv`. Tables: `repos` (run state),
 `findings` (High/Critical findings per repo, replaced on each review), `targets`
-(explicitly-added scan targets).
+(explicitly-added scan targets), `issue_tracking` (one row per finding fingerprint
+an issue was opened for, with first/last seen timestamps — the dedup ledger for
+`--create-issues`).
 
 To run the integration tests against a real server:
 
@@ -342,13 +365,42 @@ stays clean CSV. `--format json` includes everything in one document. Reads the
 same backend as every other command (`--db-url` / `SECSCAN_DB_URL` or the local
 SQLite file in `--output-dir`).
 
+### Deleting stored statistics
+
+`secscan stats reset` wipes the stats: all scan history (repo records) and all stored
+findings. It prompts for confirmation, stating what is about to be deleted; `--yes`
+skips the prompt for scripts.
+
+```bash
+uv run secscan stats reset                 # prompts, then clears history + findings
+uv run secscan stats reset --yes           # no prompt
+uv run secscan stats reset --yes --include-csv   # also delete the generated CSVs
+```
+
+Deliberately **kept**:
+
+- **Registered scan targets** (`secscan repo add`) — the reset clears results, not
+  your scan scope. Use `secscan repo remove` for those.
+- **GitHub issue tracking** — clearing it would make the next `--create-issues` run
+  re-open issues that already exist on GitHub.
+
+`--include-csv` additionally deletes `summary.csv` and every
+`<owner>__<repo>/findings.csv` under `--output-dir`, removing a per-repo directory
+only once it is empty; other files there are left alone. Without it, `output/` is
+untouched.
+
+Like every other command, `reset` acts on the configured backend — including a shared
+MySQL/MariaDB database if `--db-url` / `SECSCAN_DB_URL` is set, in which case it
+clears the stats for everyone using it.
+
 ## Output
 
 ```
 output/
   <owner>__<repo>/findings.csv   # High + Critical findings for that repo
   summary.csv                    # one row per repo: counts, status, cost, duration
-  secscan.sqlite3                # state + findings + targets (unless --db-url)
+  secscan.sqlite3                # state + findings + targets + issue tracking (unless --db-url)
+  _clones/                       # working clones, deleted after each review unless --keep-clones
 ```
 
 ## Development & tests

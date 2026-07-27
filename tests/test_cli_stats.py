@@ -96,6 +96,66 @@ def test_stats_rejects_bogus_format(tmp_path):
     assert result.exit_code != 0
 
 
+def test_stats_reset_clears_stats_but_keeps_targets_and_issues(tmp_path):
+    _seed(tmp_path)
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    store.add_target("octo", "big")
+    store.close()
+
+    result = runner.invoke(app, ["stats", "reset", "--output-dir", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "3 repo records" in result.output and "4 findings" in result.output
+
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    assert store.all_records() == []
+    assert store.severity_counts() == {}
+    assert store.list_targets() == [("octo", "big")]
+    assert store.issue_count() == 1
+
+
+def test_stats_reset_declined_changes_nothing(tmp_path):
+    _seed(tmp_path)
+
+    result = runner.invoke(
+        app, ["stats", "reset", "--output-dir", str(tmp_path)], input="n\n"
+    )
+
+    assert result.exit_code != 0
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    assert len(store.all_records()) == 3
+
+
+def test_stats_reset_include_csv_removes_generated_csvs_only(tmp_path):
+    _seed(tmp_path)
+    (tmp_path / "summary.csv").write_text("repo\n")
+    repo_dir = tmp_path / "octo__big"
+    repo_dir.mkdir()
+    (repo_dir / "findings.csv").write_text("repo\n")
+    (tmp_path / "notes.txt").write_text("keep me\n")
+
+    result = runner.invoke(
+        app, ["stats", "reset", "--output-dir", str(tmp_path), "--yes", "--include-csv"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "2 CSV files" in result.output
+    assert not (tmp_path / "summary.csv").exists()
+    assert not repo_dir.exists()  # emptied, so removed
+    assert (tmp_path / "notes.txt").exists()
+    assert (tmp_path / "secscan.sqlite3").exists()
+
+
+def test_stats_reset_leaves_csvs_alone_by_default(tmp_path):
+    _seed(tmp_path)
+    (tmp_path / "summary.csv").write_text("repo\n")
+
+    result = runner.invoke(app, ["stats", "reset", "--output-dir", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "summary.csv").exists()
+
+
 def test_stats_empty_db_is_sane(tmp_path):
     result = runner.invoke(app, ["stats", "--output-dir", str(tmp_path), "--format", "json"])
     assert result.exit_code == 0, result.output

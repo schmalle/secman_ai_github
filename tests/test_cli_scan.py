@@ -71,6 +71,60 @@ def test_scan_branch_defaults_to_none(tmp_path, monkeypatch):
     assert captured["cfg"].branch is None
 
 
+def test_scan_issue_prefix_flag_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(
+        app,
+        ["scan", "octo/demo", "--output-dir", str(tmp_path), "--issue-prefix", "acme:"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["cfg"].issue_prefix == "acme:"
+
+
+def test_scan_issue_prefix_defaults_to_secscan(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["cfg"].issue_prefix == "secscan:"
+
+
+def test_run_issue_prefix_flag_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_run_scan(cfg, **kwargs):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(
+        app,
+        ["run", "--output-dir", str(tmp_path), "--issue-prefix", "[acme]"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["cfg"].issue_prefix == "[acme]"
+
+
 def test_scan_no_db_and_email_to_reports_clean_error(tmp_path):
     result = runner.invoke(
         app,

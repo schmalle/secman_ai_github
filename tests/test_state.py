@@ -383,3 +383,32 @@ def test_last_reviewed_at_picks_latest(tmp_path):
 def test_last_reviewed_at_empty_db(tmp_path):
     store = StateStore(tmp_path / "s.sqlite3")
     assert store.last_reviewed_at() == ""
+
+
+def test_clear_stats_empties_repos_and_findings(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    _seed_stats(store)
+
+    repos_deleted, findings_deleted = store.clear_stats()
+
+    assert (repos_deleted, findings_deleted) == (3, 6)
+    assert store.all_records() == []
+    assert store.severity_counts() == {}
+    assert store.last_reviewed_at() == ""
+
+
+def test_clear_stats_keeps_targets_and_issue_tracking(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    _seed_stats(store)
+    store.add_target("octo", "big")
+
+    store.clear_stats()
+
+    assert store.list_targets() == [("octo", "big")]
+    assert store.find_issue("octo", "big", "fp1") is not None
+    assert store.issue_count() == 1
+
+
+def test_clear_stats_on_empty_db_is_a_no_op(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    assert store.clear_stats() == (0, 0)

@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 import secscan.orchestrator as orch
 from secscan.config import RunConfig
 from secscan.github_app import RepoInfo
@@ -279,7 +281,16 @@ async def test_run_scan_no_db_skips_summary_csv(tmp_path, monkeypatch, capsys):
     assert "summary.csv skipped" in capsys.readouterr().out
 
 
-async def test_process_repo_creates_issues_when_enabled(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "prefix_kwargs, expected_title",
+    [
+        ({}, "secscan: high: SQLi (app.py)"),  # default prefix
+        ({"issue_prefix": "[acme]"}, "[acme] high: SQLi (app.py)"),
+    ],
+)
+async def test_process_repo_creates_issues_when_enabled(
+    tmp_path, monkeypatch, prefix_kwargs, expected_title
+):
     from secscan.findings import Finding
     from secscan.reviewer import ReviewResult
     import secscan.orchestrator as orch_module
@@ -315,7 +326,10 @@ async def test_process_repo_creates_issues_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(orch, "cleanup", lambda path: None)
     monkeypatch.setattr(orch_module, "Github", lambda auth: _FakeGithubClient())
 
-    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", create_issues=True)
+    cfg = RunConfig(
+        output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", create_issues=True,
+        **prefix_kwargs,
+    )
     store = StateStore(cfg.state_target)
     sem = asyncio.Semaphore(1)
     provider_env = orch.ProviderEnv(name="anthropic")
@@ -326,7 +340,7 @@ async def test_process_repo_creates_issues_when_enabled(tmp_path, monkeypatch):
 
     await orch._process_repo(_repo(name="demo"), _FakeAuthCtx(), store, cfg, sem, provider_env)
 
-    assert created_calls == ["[secscan] high: SQLi (app.py)"]
+    assert created_calls == [expected_title]
 
 
 async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypatch):
