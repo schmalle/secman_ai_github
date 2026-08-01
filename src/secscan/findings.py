@@ -18,6 +18,8 @@ from typing import Any, Iterable, Mapping
 
 from pydantic import BaseModel, Field, field_validator
 
+from .redact import redact_secrets
+
 
 class Severity(str, Enum):
     CRITICAL = "critical"
@@ -50,6 +52,14 @@ class Finding(BaseModel):
         if v is None:
             return ""
         return str(v)
+
+    @field_validator("title", "description", "recommendation", mode="after")
+    @classmethod
+    def _redact_secrets(cls, v: str) -> str:
+        # Mask likely secret material once, here, so every sink (CSV, GitHub
+        # issue, email, state DB) that later reads this Finding is protected
+        # without having to remember to redact independently. See redact.py.
+        return redact_secrets(v)
 
 
 # Column order for per-repo findings CSV (`repo` prepended to the Finding fields).
@@ -164,6 +174,24 @@ def _severity_rank(f: Finding) -> int:
     return 0 if f.severity is Severity.CRITICAL else 1
 
 
+# Cell values can originate from an attacker-chosen file_path in the scanned
+# repo, or from LLM output describing that repo's content. Excel/LibreOffice
+# treat a leading '=', '+', '-', '@', tab, or CR as the start of a formula, so
+# any cell starting with one of these must be neutralized before writing —
+# otherwise opening findings.csv/summary.csv can execute attacker-controlled
+# formulas (data exfiltration via WEBSERVICE/HYPERLINK, or legacy DDE).
+_FORMULA_LEADERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> Any:
+    if value is None:
+        return value
+    text = str(value)
+    if text.startswith(_FORMULA_LEADERS):
+        return "'" + text
+    return value
+
+
 def write_findings_csv(path: Path, repo_full_name: str, findings: Iterable[Finding]) -> Path:
     """Write one repo's findings to CSV. Always writes a header row."""
     path = Path(path)
@@ -174,15 +202,15 @@ def write_findings_csv(path: Path, repo_full_name: str, findings: Iterable[Findi
         writer.writeheader()
         for f in ordered:
             row = {
-                "repo": repo_full_name,
+                "repo": _csv_cell(repo_full_name),
                 "severity": f.severity.value,
-                "title": f.title,
-                "category": f.category,
-                "file_path": f.file_path,
-                "line_range": f.line_range,
+                "title": _csv_cell(f.title),
+                "category": _csv_cell(f.category),
+                "file_path": _csv_cell(f.file_path),
+                "line_range": _csv_cell(f.line_range),
                 "confidence": f.confidence,
-                "description": f.description,
-                "recommendation": f.recommendation,
+                "description": _csv_cell(f.description),
+                "recommendation": _csv_cell(f.recommendation),
             }
             writer.writerow(row)
     return path
@@ -205,7 +233,7 @@ def write_summary_csv(path: Path, rows: Iterable[Any]) -> Path:
         writer.writeheader()
         for row in rows:
             d = _row_to_dict(row)
-            writer.writerow({k: _csv_value(d.get(k, "")) for k in SUMMARY_FIELDS})
+            writer.writerow({k: _csv_cell(_csv_value(d.get(k, ""))) for k in SUMMARY_FIELDS})
     return path
 
 
