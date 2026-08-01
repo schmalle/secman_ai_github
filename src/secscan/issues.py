@@ -14,6 +14,23 @@ from .state import StateStore
 
 DEFAULT_ISSUE_PREFIX = "secscan:"
 
+# finding.* fields are LLM output about untrusted repository content, not
+# reviewer-authored text. Unlike the emailed report (report_html._truncate,
+# capped at 500 chars), this path had no cap at all, so a successful prompt
+# injection could make secscan author and publish arbitrary-length attacker
+# text as a public, secscan-labeled GitHub issue. Cap every field before it
+# reaches the issue body/title; matches the email path's 500-char budget for
+# the free-form fields and gives short structural ones (title/category/file
+# path) a tighter bound of their own.
+_TITLE_MAX = 200
+_FIELD_MAX = 120
+_BODY_FIELD_MAX = 500
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = text or ""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
 
 @dataclass
 class IssueOutcome:
@@ -23,17 +40,21 @@ class IssueOutcome:
 
 
 def _issue_title(finding: Finding, prefix: str) -> str:
-    base = f"{finding.severity.value}: {finding.title} ({finding.file_path})"
+    base = (
+        f"{finding.severity.value}: {_truncate(finding.title, _TITLE_MAX)} "
+        f"({_truncate(finding.file_path, _FIELD_MAX)})"
+    )
     return f"{prefix} {base}" if prefix else base
 
 
 def _issue_body(finding: Finding, fp: str) -> str:
     return (
-        f"**Category:** {finding.category or '(none)'}\n"
+        f"**Category:** {_truncate(finding.category, _FIELD_MAX) or '(none)'}\n"
         f"**Confidence:** {finding.confidence}\n"
-        f"**File:** {finding.file_path} ({finding.line_range or 'line range unknown'})\n\n"
-        f"{finding.description}\n\n"
-        f"**Recommendation:**\n{finding.recommendation}\n\n"
+        f"**File:** {_truncate(finding.file_path, _FIELD_MAX)} "
+        f"({_truncate(finding.line_range, _FIELD_MAX) or 'line range unknown'})\n\n"
+        f"{_truncate(finding.description, _BODY_FIELD_MAX)}\n\n"
+        f"**Recommendation:**\n{_truncate(finding.recommendation, _BODY_FIELD_MAX)}\n\n"
         f"---\n_Opened automatically by secscan. Fingerprint: `{fp}`_"
     )
 

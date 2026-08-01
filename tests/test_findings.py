@@ -100,6 +100,30 @@ def test_write_findings_csv_roundtrip(tmp_path):
     assert rows[0]["file_path"] == "app/db.py"
 
 
+def test_write_findings_csv_neutralizes_formula_leaders(tmp_path):
+    """A repo can name a vulnerable file '=cmd|...'!A0.py' with no LLM
+    involvement at all; the real finding secscan makes about it must not turn
+    into an executable formula when the operator opens findings.csv."""
+    findings = [
+        Finding(
+            severity=Severity.HIGH,
+            title="=HYPERLINK(\"http://evil/\",\"steal\")",
+            category="+cmd|'/C calc'!A0",
+            file_path="=cmd|'/C calc'!A0.py",
+            line_range="1-1",
+            description="@SUM(1,1)",
+            recommendation="-2+3",
+            confidence="high",
+        )
+    ]
+    out = write_findings_csv(tmp_path / "findings.csv", "=octo/repo", findings)
+    with out.open() as fh:
+        rows = list(csv.DictReader(fh))
+    row = rows[0]
+    for field in ("repo", "title", "category", "file_path", "description", "recommendation"):
+        assert row[field].startswith("'"), f"{field} not neutralized: {row[field]!r}"
+
+
 def test_write_findings_csv_writes_header_even_when_empty(tmp_path):
     out = write_findings_csv(tmp_path / "findings.csv", "octo/repo", [])
     assert out.exists()
@@ -130,6 +154,27 @@ def test_write_summary_csv(tmp_path):
         parsed = list(csv.DictReader(fh))
     assert parsed[0]["repo"] == "repo"
     assert parsed[0]["critical_count"] == "1"
+
+
+def test_write_summary_csv_neutralizes_formula_leaders(tmp_path):
+    rows = [
+        {
+            "owner": "octo",
+            "repo": "repo",
+            "status": "error",
+            "critical_count": 0,
+            "high_count": 0,
+            "total_findings": 0,
+            "duration_s": 1.0,
+            "cost_usd": 0.0,
+            "reviewed_at": "2026-06-30T00:00:00Z",
+            "error": "=cmd|'/C calc'!A0",
+        }
+    ]
+    out = write_summary_csv(tmp_path / "summary.csv", rows)
+    with out.open() as fh:
+        parsed = list(csv.DictReader(fh))
+    assert parsed[0]["error"].startswith("'")
 
 
 def test_fingerprint_stable_across_line_range_changes():

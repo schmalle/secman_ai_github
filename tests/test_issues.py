@@ -72,6 +72,32 @@ def test_empty_prefix_leaves_no_leading_space(tmp_path):
     assert gh_repo.created[0][0] == "high: SQLi (app.py)"
 
 
+def test_long_llm_authored_fields_are_truncated_before_publishing(tmp_path):
+    """finding.description/recommendation/title are LLM output about
+    untrusted repo content; a prompt-injection payload could try to make
+    secscan publish an arbitrarily long attacker-chosen public GitHub issue.
+    Every field must be capped."""
+    store = StateStore(tmp_path / "s.sqlite3")
+    gh_repo = _FakeGhRepo()
+    finding = _finding(
+        title="A" * 1000,
+        description="B" * 1000,
+        recommendation="C" * 1000,
+        category="D" * 1000,
+        file_path="E" * 1000,
+    )
+
+    process_finding(gh_repo, store, "octo", "repo", finding, seen_at="2026-07-12T00:00:00+00:00", dry_run=False)
+
+    title, body, _labels = gh_repo.created[0]
+    assert len(title) < 500
+    assert "A" * 1000 not in title
+    assert "B" * 1000 not in body
+    assert "C" * 1000 not in body
+    assert "D" * 1000 not in body
+    assert "E" * 1000 not in body
+
+
 def test_repeated_finding_skips_and_touches_last_seen(tmp_path):
     store = StateStore(tmp_path / "s.sqlite3")
     gh_repo = _FakeGhRepo()
