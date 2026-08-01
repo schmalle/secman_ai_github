@@ -381,7 +381,7 @@ async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypat
 
     cfg = RunConfig(
         output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3",
-        create_issues=True, issue_dry_run=True,
+        create_issues=True, dry_run=True,
     )
     store = StateStore(cfg.state_target)
     sem = asyncio.Semaphore(1)

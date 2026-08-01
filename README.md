@@ -61,6 +61,7 @@ the environment only and never written to disk.
 | `SECMAN_URL` | secman base URL for `push-to-secman` (or `--secman-url`) |
 | `SECMAN_USERNAME` | secman username for `push-to-secman` (or `--secman-username`); needs ADMIN or VULN role |
 | `SECMAN_PASSWORD` | secman password for `push-to-secman` (or `--secman-password`) |
+| `SECSCAN_DRY_RUN` | `1`/`true`/`yes`/`on` forces `--dry-run` on `run`, `scan`, and `push-to-secman` |
 
 ## Usage
 
@@ -87,6 +88,7 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail  # auto-email after scan
 uv run secscan push-to-secman                              # push High/Critical findings to secman
 uv run secscan push-to-secman --dry-run                    # preview only
+uv run secscan run --dry-run                               # no issues opened, nothing pushed to secman
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
@@ -112,6 +114,42 @@ it), not a cap on total review duration. `--timeout 0` disables it.
 per-repo `findings.csv` is written; `summary.csv` is skipped since it's normally
 rebuilt from the state store. Useful for one-off scans where you don't want
 `output/secscan.sqlite3` (or a configured MySQL backend) touched at all.
+
+## Dry run
+
+`--dry-run` (on `run`, `scan`, and `push-to-secman`) guarantees the command makes
+**no external writes**:
+
+* **No GitHub issue is ever opened.** With `--create-issues`, the run prints what
+  it *would* create or skip and makes zero GitHub API calls and zero
+  issue-tracking DB writes (a repeat finding's "last seen" timestamp isn't
+  bumped either). Without `--create-issues` there was nothing to open anyway —
+  the flag is still accepted, and still enforced.
+* **Nothing is written to secman.** `push-to-secman --dry-run` lists what it
+  would push without logging in or calling `cli-add` even once; because it never
+  contacts secman, it doesn't need `SECMAN_URL`/`SECMAN_USERNAME`/`SECMAN_PASSWORD`
+  to be set at all.
+
+Set `SECSCAN_DRY_RUN=1` (or `true`/`yes`/`on`) to force it for every command in
+an environment — useful in CI or a shared shell where an accidental real write
+would be expensive.
+
+```bash
+uv run secscan run --create-issues --dry-run   # full run, zero issues opened
+uv run secscan push-to-secman --dry-run        # preview the secman push
+SECSCAN_DRY_RUN=1 uv run secscan run --create-issues   # same, via the environment
+```
+
+The promise is enforced, not just documented: dry-run arms a process-wide guard
+(`secscan/dryrun.py`), and every call that would open an issue or reach secman
+checks it first, raising `DryRunViolation` rather than performing the write. In a
+correct dry run the guard never fires — it's there so a future refactor that
+forgets to honour the flag fails loudly instead of silently filing issues.
+
+What `--dry-run` does **not** suppress: the security review itself still runs (and
+still costs model tokens), `findings.csv` and the scan/findings state in the DB are
+still written, and `--email-to` still sends the report. It scopes exactly to the
+two outward-facing integrations above.
 
 ## Authentication: GitHub App vs PAT
 
@@ -152,8 +190,8 @@ finding, deduped by a content fingerprint (severity + category + title + file
 path) tracked in the state DB — re-scanning the same repo never opens a second
 issue for a finding already tracked, it just bumps that finding's "last seen"
 timestamp. `--dry-run` previews what would be created/skipped with **zero**
-GitHub API calls and zero DB writes. Requires the DB (`--no-db --create-issues`
-is a config error).
+GitHub API calls and zero DB writes (see [Dry run](#dry-run)). Requires the DB
+(`--no-db --create-issues` is a config error).
 
 ```bash
 uv run secscan scan octo/webapp --create-issues --dry-run   # preview
@@ -195,6 +233,9 @@ export SECMAN_PASSWORD=…
 uv run secscan push-to-secman --dry-run   # preview what would be pushed
 uv run secscan push-to-secman             # actually push
 ```
+
+`--dry-run` makes zero login/`cli-add` calls, so nothing reaches secman and no
+secman credentials are needed — see [Dry run](#dry-run).
 
 **Known limitation:** secman's `cli-add` schema has no free-text field — it only
 shows a compact identifier (`SECSCAN:<category>:<fingerprint prefix>`), severity,

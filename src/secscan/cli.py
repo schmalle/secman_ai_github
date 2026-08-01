@@ -83,6 +83,29 @@ def _resolve_secman_password(password: str | None) -> str | None:
     return password or os.environ.get("SECMAN_PASSWORD") or None
 
 
+_DRY_RUN_HELP = (
+    "Make no external writes: no GitHub issue is opened (with --create-issues, "
+    "preview what would be created/skipped, with zero GitHub API calls and zero "
+    "issue-tracking DB writes) and nothing is pushed to secman. The review itself "
+    "still runs and still writes findings.csv and local state. Also settable via "
+    "SECSCAN_DRY_RUN=1."
+)
+
+
+def _enter_dry_run(flag: bool) -> bool:
+    """Resolve --dry-run (flag or SECSCAN_DRY_RUN) and arm the guard if it's on.
+
+    Arming happens here, at the CLI edge, so every code path a command reaches is
+    covered — not just the ones that remembered to check the flag.
+    """
+    from . import dryrun
+
+    if not dryrun.resolve(flag):
+        return False
+    dryrun.activate()
+    return True
+
+
 def _split_full_name(value: str) -> tuple[str, str]:
     parts = value.split("/")
     if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -125,7 +148,7 @@ def _run_config(
     db_ssl: bool = False,
     no_db: bool = False,
     create_issues: bool = False,
-    issue_dry_run: bool = False,
+    dry_run: bool = False,
     issue_prefix: str = "secscan:",
     provider: str = "auto",
     timeout_s: float = 900.0,
@@ -149,7 +172,7 @@ def _run_config(
         db_ssl=db_ssl,
         no_db=no_db,
         create_issues=create_issues,
-        issue_dry_run=issue_dry_run,
+        dry_run=dry_run,
         issue_prefix=issue_prefix.strip(),
         filters=Filters(
             include_archived=include_archived,
@@ -202,7 +225,7 @@ def run(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    dry_run: bool = typer.Option(False, "--dry-run", help=_DRY_RUN_HELP),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
     model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
@@ -257,7 +280,7 @@ def run(
             output_dir, concurrency, model, max_turns, max_cost_usd,
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -343,7 +366,7 @@ def scan(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
+    dry_run: bool = typer.Option(False, "--dry-run", help=_DRY_RUN_HELP),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
     provider: str = typer.Option(
@@ -389,7 +412,7 @@ def scan(
             output_dir, 1, model, max_turns, max_cost_usd,
             False, False, 0, keep_clones, False, None,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
-            no_db=no_db, create_issues=create_issues, issue_dry_run=dry_run,
+            no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -664,7 +687,13 @@ def push_to_secman(
     secman_url: str = typer.Option(None, "--secman-url", help="secman base URL (or SECMAN_URL env)."),
     secman_username: str = typer.Option(None, "--secman-username", help="secman username (or SECMAN_USERNAME env)."),
     secman_password: str = typer.Option(None, "--secman-password", help="secman password (or SECMAN_PASSWORD env)."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview what would be pushed; makes zero login/API calls."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help=(
+            "Preview what would be pushed; makes zero login/API calls, so nothing "
+            "is written to secman. Also settable via SECSCAN_DRY_RUN=1."
+        ),
+    ),
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env)."),
@@ -677,10 +706,13 @@ def push_to_secman(
     from . import secman_client
     from .findings import fingerprint
 
+    dry_run = _enter_dry_run(dry_run)
+
     url = _resolve_secman_url(secman_url)
     username = _resolve_secman_username(secman_username)
     password = _resolve_secman_password(secman_password)
-    if not url or not username or not password:
+    # A dry run never logs in or posts, so it needs no secman credentials at all.
+    if not dry_run and (not url or not username or not password):
         typer.echo(
             "Error: secman URL/username/password required "
             "(--secman-url/--secman-username/--secman-password or "
@@ -688,6 +720,9 @@ def push_to_secman(
             err=True,
         )
         raise typer.Exit(1)
+
+    if dry_run:
+        typer.echo("Dry run: nothing will be written to secman.")
 
     store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
     records = store.all_records()

@@ -77,7 +77,9 @@ class RunConfig:
     db_ssl: bool = False  # encrypt the MySQL connection (no custom CA/cert/key)
     no_db: bool = False  # skip all DB storage; findings.csv still written, summary.csv skipped
     create_issues: bool = False  # open one GitHub issue per new High/Critical finding
-    issue_dry_run: bool = False  # preview issue creation without any GitHub API calls or DB writes
+    # No external writes: no GitHub issues are opened and nothing is pushed to secman.
+    # Reviews still run and local CSV/state is still written; see dryrun.py.
+    dry_run: bool = False
     issue_prefix: str = "secscan:"  # prepended to issue titles; empty string means no prefix
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4

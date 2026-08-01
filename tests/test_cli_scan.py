@@ -197,3 +197,85 @@ def test_scan_email_flags_reach_config(tmp_path, monkeypatch):
     assert cfg.email_to == ["a@x.com", "b@y.com"]
     assert cfg.email_provider == "gmail"
     assert cfg.email_subject == "weekly scan"
+
+
+# -- dry run ---------------------------------------------------------------------
+
+
+def test_scan_dry_run_flag_reaches_config_and_arms_the_guard(tmp_path, monkeypatch):
+    import secscan.orchestrator
+    from secscan import dryrun
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+        captured["armed"] = dryrun.is_active()
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].dry_run is True
+    # Armed even without --create-issues: --dry-run is a promise about the whole
+    # command, not a modifier on one flag.
+    assert captured["armed"] is True
+
+
+def test_run_dry_run_flag_reaches_config_and_arms_the_guard(tmp_path, monkeypatch):
+    import secscan.orchestrator
+    from secscan import dryrun
+
+    captured = {}
+
+    async def fake_run_scan(cfg, **kwargs):
+        captured["cfg"] = cfg
+        captured["armed"] = dryrun.is_active()
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(app, ["run", "--output-dir", str(tmp_path), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].dry_run is True
+    assert captured["armed"] is True
+
+
+def test_run_dry_run_defaults_to_false(tmp_path, monkeypatch):
+    import secscan.orchestrator
+    from secscan import dryrun
+
+    captured = {}
+
+    async def fake_run_scan(cfg, **kwargs):
+        captured["cfg"] = cfg
+        captured["armed"] = dryrun.is_active()
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(app, ["run", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].dry_run is False
+    assert captured["armed"] is False
+
+
+def test_run_dry_run_via_env(tmp_path, monkeypatch):
+    import secscan.orchestrator
+    from secscan import dryrun
+
+    monkeypatch.setenv("SECSCAN_DRY_RUN", "1")
+    captured = {}
+
+    async def fake_run_scan(cfg, **kwargs):
+        captured["cfg"] = cfg
+        captured["armed"] = dryrun.is_active()
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(app, ["run", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].dry_run is True
+    assert captured["armed"] is True

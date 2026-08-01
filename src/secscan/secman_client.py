@@ -12,6 +12,8 @@ from __future__ import annotations
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from . import dryrun
+
 _TIMEOUT_S = 30
 _RETRY = dict(
     stop=stop_after_attempt(3),
@@ -36,6 +38,7 @@ def _extract_cookie_token(set_cookie_header: str, cookie_name: str = "secman_aut
 @retry(**_RETRY)
 def login(base_url: str, username: str, password: str) -> str:
     """POST /api/auth/login, return the JWT extracted from Set-Cookie."""
+    dryrun.guard("authenticate against secman")
     resp = requests.post(
         f"{base_url}/api/auth/login",
         json={"username": username, "password": password},
@@ -62,6 +65,7 @@ def push_vulnerability(
     days_open: int,
 ) -> dict:
     """POST /api/vulnerabilities/cli-add with Authorization: Bearer {token}."""
+    dryrun.guard(f"push {cve} for {hostname} to secman")
     resp = requests.post(
         f"{base_url}/api/vulnerabilities/cli-add",
         json={"hostname": hostname, "cve": cve, "criticality": criticality, "daysOpen": days_open},
