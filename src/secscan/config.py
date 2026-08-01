@@ -82,7 +82,7 @@ class RunConfig:
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     model: str = "sonnet"
-    provider: str = "auto"  # anthropic | openrouter | auto | usecc (see providers.py)
+    provider: str = "auto"  # anthropic | openrouter | kimi | copilot | auto | usecc (providers.py)
     max_turns: int = 60
     max_cost_usd: float | None = None  # per-repo abort threshold; None = no cap
     timeout_s: float = 900.0  # abort if the agent stalls (no messages) this long; 0 disables
