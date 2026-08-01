@@ -123,8 +123,9 @@ rebuilt from the state store. Useful for one-off scans where you don't want
 * **No GitHub issue is ever opened.** With `--create-issues`, the run prints what
   it *would* create or skip and makes zero GitHub API calls and zero
   issue-tracking DB writes (a repeat finding's "last seen" timestamp isn't
-  bumped either). Without `--create-issues` there was nothing to open anyway —
-  the flag is still accepted, and still enforced.
+  bumped either). Without `--create-issues` nothing would be opened anyway, but
+  the flag is still accepted and still enforced — so it's safe to pass
+  unconditionally in a wrapper script.
 * **Nothing is written to secman.** `push-to-secman --dry-run` lists what it
   would push without logging in or calling `cli-add` even once; because it never
   contacts secman, it doesn't need `SECMAN_URL`/`SECMAN_USERNAME`/`SECMAN_PASSWORD`
@@ -454,6 +455,11 @@ uv run pytest -v tests/test_emailer.py        # e.g. one module
 Tests never hit the network: the Claude Agent SDK, PyGithub, and SMTP are replaced
 with fakes. MySQL/MariaDB integration tests are skipped unless
 `SECSCAN_TEST_MYSQL_URL` is set (see above).
+
+The [dry-run](#dry-run) guard is process-wide state, so `tests/conftest.py` disarms
+it (and clears `SECSCAN_DRY_RUN`) around every test — a test that arms the guard
+must not leak into the next one, and a stray `SECSCAN_DRY_RUN` in your shell must
+not change what the suite exercises.
 
 ## Notes & limits
 

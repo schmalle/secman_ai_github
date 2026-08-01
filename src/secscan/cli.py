@@ -10,6 +10,10 @@ Commands:
   repo        manage explicitly-added scan targets (add / list / remove)
   send-report email the latest results as an HTML report (Gmail / O365 / custom SMTP)
   push-to-secman push High/Critical findings from the state DB into secman
+
+`--dry-run` (on run / scan / push-to-secman, or SECSCAN_DRY_RUN=1 for all three)
+means no external writes: no GitHub issue is opened and nothing reaches secman.
+It also arms the guard in dryrun.py — see that module and CLAUDE.md.
 """
 
 from __future__ import annotations
