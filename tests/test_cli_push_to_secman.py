@@ -156,6 +156,15 @@ def test_push_to_secman_long_category_is_truncated(tmp_path, monkeypatch):
     monkeypatch.setattr(
         secman_client, "push_vulnerability",
         lambda url, token, **kw: pushed.append(kw) or {"operation": "CREATED"},
+def test_push_to_secman_dry_run_via_env(tmp_path, monkeypatch):
+    _seed(tmp_path)
+    _secman_env(monkeypatch)
+    monkeypatch.setenv("SECSCAN_DRY_RUN", "true")
+
+    monkeypatch.setattr(secman_client, "login", lambda url, u, p: "tok")
+    monkeypatch.setattr(
+        secman_client, "push_vulnerability",
+        lambda *a, **kw: {"operation": "CREATED"},
     )
 
     result = runner.invoke(app, ["push-to-secman", "--output-dir", str(tmp_path)])
@@ -165,3 +174,33 @@ def test_push_to_secman_long_category_is_truncated(tmp_path, monkeypatch):
     cve = pushed[0]["cve"]
     assert "D" * 1000 not in cve
     assert len(cve) < 300
+    assert "would push 2" in result.output
+
+
+def test_push_to_secman_dry_run_needs_no_credentials(tmp_path, monkeypatch):
+    """Nothing is contacted, so missing secman credentials must not block a preview."""
+    _seed(tmp_path)
+    for var in ("SECMAN_URL", "SECMAN_USERNAME", "SECMAN_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = runner.invoke(app, ["push-to-secman", "--dry-run", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "would push 2" in result.output
+
+
+def test_push_to_secman_dry_run_arms_the_guard(tmp_path, monkeypatch):
+    """The real client (not a stub) must refuse to talk to secman during a dry run."""
+    from secscan import dryrun
+
+    _seed(tmp_path)
+    _secman_env(monkeypatch)
+
+    result = runner.invoke(app, ["push-to-secman", "--dry-run", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert dryrun.is_active() is True
+    import pytest
+
+    with pytest.raises(dryrun.DryRunViolation):
+        secman_client.login("https://secman.example.com", "u", "p")

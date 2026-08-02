@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import dryrun
 from .findings import Finding, fingerprint
 from .state import StateStore
 
@@ -75,12 +76,14 @@ def process_finding(
 
     if existing:
         if not dry_run:
+            dryrun.guard(f"record a new sighting of {owner}/{repo} issue #{existing.issue_number}")
             store.touch_issue_seen(owner, repo, fp, seen_at)
         return IssueOutcome(action="skipped", finding_title=finding.title, issue_url=existing.issue_url)
 
     if dry_run:
         return IssueOutcome(action="would_create", finding_title=finding.title)
 
+    dryrun.guard(f"open a GitHub issue on {owner}/{repo}")
     issue = gh_repo.create_issue(
         title=_issue_title(finding, prefix), body=_issue_body(finding, fp), labels=["secscan"]
     )

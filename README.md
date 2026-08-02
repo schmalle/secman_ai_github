@@ -27,7 +27,8 @@ treated as untrusted data (prompt-injection aware).
 - `git` on `PATH`.
 - Node + the Claude Code CLI installed and authenticated. The Claude Agent SDK shells
   out to it. Auth via `ANTHROPIC_API_KEY`, a logged-in Claude subscription, **or** an
-  `OPENROUTER_API_KEY` (see [Choosing a provider](#choosing-a-provider---provider)).
+  `OPENROUTER_API_KEY`, a Moonshot/Kimi key, or a local GitHub Copilot bridge (see
+  [Choosing a provider](#choosing-a-provider---provider)).
 - GitHub credentials — one (or both) of:
   - A **GitHub App** installed on the target org(s)/repos with permissions
     **Contents: Read**, **Metadata: Read**. You need its App ID and a private key (`.pem`).
@@ -51,6 +52,12 @@ the environment only and never written to disk.
 | `GITHUB_TOKEN` | Personal access token — alternative or complement to the App |
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
 | `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
+| `MOONSHOT_API_KEY` | Route reviews through Kimi (Moonshot); `KIMI_API_KEY` works too. Auto-selected when set and no OpenRouter key is present |
+| `KIMI_BASE_URL` | Override the Kimi endpoint (default `https://api.moonshot.ai/anthropic`; mainland China: `https://api.moonshot.cn/anthropic`) |
+| `KIMI_MODEL` | Kimi model the default `--model` alias resolves to (default `kimi-k2.7-code`) |
+| `COPILOT_BASE_URL` | Anthropic-compatible GitHub Copilot bridge for `--provider copilot` (default `http://localhost:4141`) |
+| `COPILOT_API_KEY` | Token for that bridge, if it requires one (`GITHUB_COPILOT_API_KEY` works too) |
+| `COPILOT_MODEL` | Copilot model the default `--model` alias resolves to (default `claude-sonnet-4.5`) |
 | `SECSCAN_DB_URL` | `mysql://user:pass@host:3306/secscan` for state + findings + targets; unset = local SQLite |
 | `DB_USERNAME` | MySQL/MariaDB username (or `--db-user`); overrides any user embedded in `SECSCAN_DB_URL` |
 | `DB_PASSWORD` | MySQL/MariaDB password (or `--db-password`); overrides any password embedded in `SECSCAN_DB_URL` |
@@ -61,6 +68,7 @@ the environment only and never written to disk.
 | `SECMAN_URL` | secman base URL for `push-to-secman` (or `--secman-url`) |
 | `SECMAN_USERNAME` | secman username for `push-to-secman` (or `--secman-username`); needs ADMIN or VULN role |
 | `SECMAN_PASSWORD` | secman password for `push-to-secman` (or `--secman-password`) |
+| `SECSCAN_DRY_RUN` | `1`/`true`/`yes`/`on` forces `--dry-run` on `run`, `scan`, and `push-to-secman` |
 
 ## Usage
 
@@ -87,6 +95,7 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail  # auto-email after scan
 uv run secscan push-to-secman                              # push High/Critical findings to secman
 uv run secscan push-to-secman --dry-run                    # preview only
+uv run secscan run --dry-run                               # no issues opened, nothing pushed to secman
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
@@ -112,6 +121,43 @@ it), not a cap on total review duration. `--timeout 0` disables it.
 per-repo `findings.csv` is written; `summary.csv` is skipped since it's normally
 rebuilt from the state store. Useful for one-off scans where you don't want
 `output/secscan.sqlite3` (or a configured MySQL backend) touched at all.
+
+## Dry run
+
+`--dry-run` (on `run`, `scan`, and `push-to-secman`) guarantees the command makes
+**no external writes**:
+
+* **No GitHub issue is ever opened.** With `--create-issues`, the run prints what
+  it *would* create or skip and makes zero GitHub API calls and zero
+  issue-tracking DB writes (a repeat finding's "last seen" timestamp isn't
+  bumped either). Without `--create-issues` nothing would be opened anyway, but
+  the flag is still accepted and still enforced — so it's safe to pass
+  unconditionally in a wrapper script.
+* **Nothing is written to secman.** `push-to-secman --dry-run` lists what it
+  would push without logging in or calling `cli-add` even once; because it never
+  contacts secman, it doesn't need `SECMAN_URL`/`SECMAN_USERNAME`/`SECMAN_PASSWORD`
+  to be set at all.
+
+Set `SECSCAN_DRY_RUN=1` (or `true`/`yes`/`on`) to force it for every command in
+an environment — useful in CI or a shared shell where an accidental real write
+would be expensive.
+
+```bash
+uv run secscan run --create-issues --dry-run   # full run, zero issues opened
+uv run secscan push-to-secman --dry-run        # preview the secman push
+SECSCAN_DRY_RUN=1 uv run secscan run --create-issues   # same, via the environment
+```
+
+The promise is enforced, not just documented: dry-run arms a process-wide guard
+(`secscan/dryrun.py`), and every call that would open an issue or reach secman
+checks it first, raising `DryRunViolation` rather than performing the write. In a
+correct dry run the guard never fires — it's there so a future refactor that
+forgets to honour the flag fails loudly instead of silently filing issues.
+
+What `--dry-run` does **not** suppress: the security review itself still runs (and
+still costs model tokens), `findings.csv` and the scan/findings state in the DB are
+still written, and `--email-to` still sends the report. It scopes exactly to the
+two outward-facing integrations above.
 
 ## Authentication: GitHub App vs PAT
 
@@ -152,8 +198,8 @@ finding, deduped by a content fingerprint (severity + category + title + file
 path) tracked in the state DB — re-scanning the same repo never opens a second
 issue for a finding already tracked, it just bumps that finding's "last seen"
 timestamp. `--dry-run` previews what would be created/skipped with **zero**
-GitHub API calls and zero DB writes. Requires the DB (`--no-db --create-issues`
-is a config error).
+GitHub API calls and zero DB writes (see [Dry run](#dry-run)). Requires the DB
+(`--no-db --create-issues` is a config error).
 
 ```bash
 uv run secscan scan octo/webapp --create-issues --dry-run   # preview
@@ -195,6 +241,9 @@ export SECMAN_PASSWORD=…
 uv run secscan push-to-secman --dry-run   # preview what would be pushed
 uv run secscan push-to-secman             # actually push
 ```
+
+`--dry-run` makes zero login/`cli-add` calls, so nothing reaches secman and no
+secman credentials are needed — see [Dry run](#dry-run).
 
 **Known limitation:** secman's `cli-add` schema has no free-text field — it only
 shows a compact identifier (`SECSCAN:<category>:<fingerprint prefix>`), severity,
@@ -260,10 +309,18 @@ picks which API endpoint bills the tokens. Available on `run`, `scan`, and `revi
 
 | `--provider` | Behavior |
 |---|---|
-| `auto` (default) | OpenRouter if `OPENROUTER_API_KEY` is set, else Anthropic. |
-| `anthropic` | Force direct Anthropic auth (`ANTHROPIC_API_KEY` or a logged-in Claude subscription), ignoring `OPENROUTER_API_KEY` even if set. Does **not** strip an already-exported `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` — use `usecc` if those need clearing too. |
+| `auto` (default) | OpenRouter if `OPENROUTER_API_KEY` is set, else Kimi if `MOONSHOT_API_KEY`/`KIMI_API_KEY` is set, else Anthropic. Never picks `copilot` — that one needs a local bridge process running. |
+| `anthropic` | Force direct Anthropic auth (`ANTHROPIC_API_KEY` or a logged-in Claude subscription), ignoring every other provider key even if set. Does **not** strip an already-exported `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` — use `usecc` if those need clearing too. |
 | `openrouter` | Force OpenRouter; fails with a config error if `OPENROUTER_API_KEY` isn't set. |
-| `usecc` | Force the **locally authenticated Claude Code session**. Ignores `OPENROUTER_API_KEY` and explicitly clears any inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, so a shell that still exports OpenRouter vars (or any other Anthropic auth override) can't hijack the review — Claude Code falls back to your `claude.ai` login. |
+| `kimi` | Force Kimi (Moonshot) via its Anthropic-compatible endpoint; fails with a config error if `MOONSHOT_API_KEY`/`KIMI_API_KEY` isn't set. |
+| `copilot` | Force GitHub Copilot via a local Anthropic-compatible bridge at `COPILOT_BASE_URL`. |
+| `usecc` | Force the **locally authenticated Claude Code session**. Ignores every provider key and explicitly clears any inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, so a shell that still exports OpenRouter vars (or any other Anthropic auth override) can't hijack the review — Claude Code falls back to your `claude.ai` login. |
+
+Every non-Anthropic provider works the same way: it speaks the Anthropic
+`/v1/messages` API, so secscan only overrides `ANTHROPIC_BASE_URL` /
+`ANTHROPIC_AUTH_TOKEN` for the review subprocess (and blanks any inherited
+`ANTHROPIC_API_KEY` so it can't conflict). The Claude Code CLI still has to be
+installed either way.
 
 ### Using OpenRouter
 
@@ -280,9 +337,45 @@ Note: with OpenRouter, `--model` takes an **OpenRouter slug** such as
 directly. The Claude Code CLI still needs to be installed; only its
 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` are overridden for the review subprocess.
 
+### Using Kimi (Moonshot)
+
+Set `MOONSHOT_API_KEY` (or `KIMI_API_KEY`) and Kimi is used automatically when no
+OpenRouter key is present; force it explicitly with `--provider kimi`.
+
+```bash
+export MOONSHOT_API_KEY=sk-…
+uv run secscan run --provider kimi --model kimi-k2.7-code
+```
+
+`--model` takes **Moonshot model IDs** (`kimi-k2.7-code`, `kimi-k3`, …). Left at the
+default, the `sonnet` alias maps to `kimi-k2.7-code` and `opus` maps to `kimi-k3`;
+set `KIMI_MODEL` to change what the alias resolves to without passing `--model`
+everywhere. For the mainland-China platform, set
+`KIMI_BASE_URL=https://api.moonshot.cn/anthropic`.
+
+### Using GitHub Copilot
+
+Copilot's API speaks OpenAI, not Anthropic, so this provider expects a local
+Anthropic-compatible bridge in front of your Copilot subscription — e.g.
+[`copilot-api`](https://github.com/ericc-ch/copilot-api), which listens on
+`http://localhost:4141`:
+
+```bash
+npx copilot-api@latest start          # in another terminal; authenticates with GitHub
+uv run secscan scan --provider copilot --model claude-sonnet-4.5 octo/webapp
+```
+
+`--model` takes **Copilot model IDs** (`claude-sonnet-4.5`, `gpt-4.1`, … — whatever
+your Copilot plan exposes); the default `sonnet` alias maps to `claude-sonnet-4.5`,
+and `COPILOT_MODEL` overrides that. Point `COPILOT_BASE_URL` at the bridge if it
+isn't on the default port. secscan sends a placeholder bearer token unless
+`COPILOT_API_KEY` is set, so a real Anthropic credential is never forwarded to the
+local bridge. Check your Copilot plan's terms before pointing an automated scanner
+at it.
+
 ### Forcing your local Claude Code login (`--provider usecc`)
 
-Use this when `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` is
+Use this when `OPENROUTER_API_KEY`, `MOONSHOT_API_KEY`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` is
 set somewhere in your environment (e.g. exported in a shell profile for other tools)
 and you want to guarantee the review runs against your own `claude.ai` subscription
 login instead — no key lookup, no OpenRouter, no risk of an inherited env var being
@@ -413,6 +506,11 @@ uv run pytest -v tests/test_emailer.py        # e.g. one module
 Tests never hit the network: the Claude Agent SDK, PyGithub, and SMTP are replaced
 with fakes. MySQL/MariaDB integration tests are skipped unless
 `SECSCAN_TEST_MYSQL_URL` is set (see above).
+
+The [dry-run](#dry-run) guard is process-wide state, so `tests/conftest.py` disarms
+it (and clears `SECSCAN_DRY_RUN`) around every test — a test that arms the guard
+must not leak into the next one, and a stray `SECSCAN_DRY_RUN` in your shell must
+not change what the suite exercises.
 
 ## Notes & limits
 

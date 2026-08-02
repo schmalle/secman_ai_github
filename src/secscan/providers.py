@@ -1,9 +1,10 @@
 """LLM provider selection for the Claude Code reviewer.
 
 The reviewer is always Claude Code (via the Claude Agent SDK); this module only
-decides which API endpoint bills the tokens. OpenRouter exposes an
-Anthropic-compatible endpoint, so routing through it is just a matter of pointing
-the Claude Code subprocess at a different base URL with an OpenRouter key.
+decides which API endpoint bills the tokens. Every non-Anthropic provider here
+works the same way: it exposes an Anthropic-compatible `/v1/messages` endpoint,
+so routing through it is just a matter of pointing the Claude Code subprocess at
+a different base URL with that provider's token.
 
 Providers:
 - "anthropic": the default — the SDK uses ANTHROPIC_API_KEY (or a logged-in
@@ -13,11 +14,21 @@ Providers:
   "usecc" for that.
 - "openrouter": requires OPENROUTER_API_KEY; model names must be OpenRouter slugs
   (e.g. "anthropic/claude-sonnet-4.5").
-- "auto": openrouter iff OPENROUTER_API_KEY is set, else anthropic. Setting the
-  key is the opt-in; --provider anthropic forces Anthropic even when both keys
-  are present.
-- "usecc": force the locally authenticated Claude Code session. Ignores
-  OPENROUTER_API_KEY and explicitly neutralizes any inherited
+- "kimi": Moonshot AI's Anthropic-compatible endpoint. Requires MOONSHOT_API_KEY
+  (KIMI_API_KEY is accepted as an alias); model names are Kimi model IDs
+  (e.g. "kimi-k2.7-code"). Override the endpoint with KIMI_BASE_URL for the
+  mainland-China host (https://api.moonshot.cn/anthropic) or a gateway.
+- "copilot": GitHub Copilot. Copilot itself speaks the OpenAI API, so this
+  provider expects a local Anthropic-compatible Copilot bridge (e.g.
+  `npx copilot-api@latest start`, which listens on http://localhost:4141);
+  point COPILOT_BASE_URL at it if it isn't on the default port. Model names are
+  Copilot model IDs (e.g. "claude-sonnet-4.5", "gpt-4.1").
+- "auto": openrouter iff OPENROUTER_API_KEY is set, else kimi iff a Moonshot key
+  is set, else anthropic. Setting the key is the opt-in; --provider anthropic
+  forces Anthropic even when several keys are present. "copilot" is never
+  auto-selected because it needs a bridge process running locally.
+- "usecc": force the locally authenticated Claude Code session. Ignores every
+  provider key and explicitly neutralizes any inherited
   ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN, since the Claude
   Code CLI treats any of those as "another auth source" and disables the
   claude.ai-login-backed connectors otherwise.
@@ -30,8 +41,19 @@ from dataclasses import dataclass, field
 from .config import ConfigError, _env
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"
+KIMI_BASE_URL = "https://api.moonshot.ai/anthropic"
+COPILOT_BASE_URL = "http://localhost:4141"
 
-_PROVIDERS = ("anthropic", "openrouter", "auto", "usecc")
+# Copilot bridges run on the user's own machine and generally accept any bearer
+# token. We still send one so the Claude Code subprocess never falls back to a
+# real Anthropic credential (or an interactive login) against a local endpoint.
+COPILOT_PLACEHOLDER_TOKEN = "copilot"
+
+_PROVIDERS = ("anthropic", "openrouter", "kimi", "copilot", "auto", "usecc")
+
+# Bare model aliases the Claude Code CLI understands against Anthropic itself.
+# No other provider has an equivalent, so they get mapped per-provider below.
+_ANTHROPIC_ALIASES = ("sonnet", "opus", "haiku")
 
 
 @dataclass(frozen=True)
@@ -40,6 +62,24 @@ class ProviderEnv:
 
     name: str
     env: dict[str, str] = field(default_factory=dict)
+    endpoint: str = ""  # base URL reviews are routed to ("" = Anthropic's default)
+
+
+def _gateway_env(name: str, base_url: str, token: str) -> ProviderEnv:
+    """Point the Claude Code subprocess at an Anthropic-compatible gateway."""
+    return ProviderEnv(
+        name=name,
+        env={
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_AUTH_TOKEN": token,
+            "ANTHROPIC_API_KEY": "",  # neutralize any inherited Anthropic key
+        },
+        endpoint=base_url,
+    )
+
+
+def _moonshot_key() -> str | None:
+    return _env("MOONSHOT_API_KEY") or _env("KIMI_API_KEY")
 
 
 def resolve_provider(provider: str = "auto") -> ProviderEnv:
@@ -57,38 +97,73 @@ def resolve_provider(provider: str = "auto") -> ProviderEnv:
             },
         )
 
-    key = _env("OPENROUTER_API_KEY")
+    openrouter_key = _env("OPENROUTER_API_KEY")
     if provider == "auto":
-        provider = "openrouter" if key else "anthropic"
+        if openrouter_key:
+            provider = "openrouter"
+        elif _moonshot_key():
+            provider = "kimi"
+        else:
+            provider = "anthropic"
 
     if provider == "anthropic":
         return ProviderEnv(name="anthropic")
 
-    if not key:
-        raise ConfigError("OPENROUTER_API_KEY is required for --provider openrouter")
-    return ProviderEnv(
-        name="openrouter",
-        env={
-            "ANTHROPIC_BASE_URL": OPENROUTER_BASE_URL,
-            "ANTHROPIC_AUTH_TOKEN": key,
-            "ANTHROPIC_API_KEY": "",  # neutralize any inherited Anthropic key
-        },
+    if provider == "openrouter":
+        if not openrouter_key:
+            raise ConfigError("OPENROUTER_API_KEY is required for --provider openrouter")
+        return _gateway_env("openrouter", OPENROUTER_BASE_URL, openrouter_key)
+
+    if provider == "kimi":
+        key = _moonshot_key()
+        if not key:
+            raise ConfigError("MOONSHOT_API_KEY (or KIMI_API_KEY) is required for --provider kimi")
+        return _gateway_env("kimi", _env("KIMI_BASE_URL") or KIMI_BASE_URL, key)
+
+    # copilot: a local bridge translates Anthropic /v1/messages to the Copilot API.
+    return _gateway_env(
+        "copilot",
+        _env("COPILOT_BASE_URL") or COPILOT_BASE_URL,
+        _env("COPILOT_API_KEY") or _env("GITHUB_COPILOT_API_KEY") or COPILOT_PLACEHOLDER_TOKEN,
     )
 
 
 # The bare Anthropic aliases ("sonnet", "opus", ...) that the CLI understands
-# directly have no OpenRouter equivalent; map the one we default to so
-# `--model` left unset still resolves to a working model on either provider.
-_OPENROUTER_MODEL_ALIASES = {
-    "sonnet": "anthropic/claude-sonnet-5",
+# directly have no equivalent on the other providers; map the one we default to
+# so `--model` left unset still resolves to a working model everywhere.
+_MODEL_ALIASES = {
+    "openrouter": {
+        "sonnet": "anthropic/claude-sonnet-5",
+    },
+    "kimi": {
+        "sonnet": "kimi-k2.7-code",  # Moonshot's coding-agent tier
+        "opus": "kimi-k3",  # Moonshot's flagship
+    },
+    "copilot": {
+        "sonnet": "claude-sonnet-4.5",
+    },
 }
+
+# Model lineups on these providers move faster than this table; let the
+# environment override which model a bare alias resolves to.
+_MODEL_ENV_OVERRIDES = {"kimi": "KIMI_MODEL", "copilot": "COPILOT_MODEL"}
 
 
 def resolve_model(provider_env: ProviderEnv, model: str) -> str:
-    """Map a bare Anthropic alias to its OpenRouter slug when routing through OpenRouter."""
-    if provider_env.name == "openrouter":
-        return _OPENROUTER_MODEL_ALIASES.get(model, model)
-    return model
+    """Map a bare Anthropic alias to the equivalent model on the routed provider.
+
+    Explicit model names are always passed through untouched.
+    """
+    if model not in _ANTHROPIC_ALIASES:
+        return model
+
+    override_var = _MODEL_ENV_OVERRIDES.get(provider_env.name)
+    if override_var:
+        override = _env(override_var)
+        if override:
+            return override
+
+    return _MODEL_ALIASES.get(provider_env.name, {}).get(model, model)
 
 
 def model_hint(provider_env: ProviderEnv, model: str) -> str | None:
@@ -97,5 +172,16 @@ def model_hint(provider_env: ProviderEnv, model: str) -> str | None:
         return (
             f"hint: OpenRouter expects model slugs like 'anthropic/claude-sonnet-4.5' "
             f"(got {model!r})"
+        )
+    if provider_env.name == "kimi" and not model.startswith("kimi"):
+        return (
+            f"hint: Kimi expects Moonshot model IDs like 'kimi-k2.7-code' (got {model!r}); "
+            f"set KIMI_MODEL to change what the default alias resolves to"
+        )
+    if provider_env.name == "copilot" and model in _ANTHROPIC_ALIASES:
+        return (
+            f"hint: GitHub Copilot expects Copilot model IDs like 'claude-sonnet-4.5' "
+            f"or 'gpt-4.1' (got {model!r}); set COPILOT_MODEL to change what the "
+            f"default alias resolves to"
         )
     return None
