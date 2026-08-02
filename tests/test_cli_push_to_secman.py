@@ -125,3 +125,43 @@ def test_push_to_secman_cve_format_and_days_open_default_zero(tmp_path, monkeypa
     sqli = next(p for p in pushed if p["hostname"] == "octo/demo" and p["criticality"] == "CRITICAL")
     assert sqli["cve"].startswith("SECSCAN:CWE-89:")
     assert sqli["days_open"] == 0  # no issue_tracking row exists for this finding
+
+
+def test_push_to_secman_long_category_is_truncated(tmp_path, monkeypatch):
+    """row['category'] is LLM output about untrusted repository content; a
+    prompt-injection payload could try to make secscan push an arbitrarily
+    long attacker-chosen string as the 'cve' identifier into secman. It must
+    be capped before it reaches secman_client.push_vulnerability, mirroring
+    the GitHub-issue path's field caps (test_issues.py)."""
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    store.record_result(
+        "octo", "demo",
+        critical=1, high=0, total=1,
+        duration_s=1.0, cost_usd=0.1, reviewed_at="2026-07-01T00:00:00+00:00",
+    )
+    store.replace_findings(
+        "octo", "demo",
+        [
+            Finding(
+                severity="critical", title="Injected", description="d", file_path="a.py",
+                category="D" * 1000,
+            ),
+        ],
+    )
+    store.close()
+    _secman_env(monkeypatch)
+
+    monkeypatch.setattr(secman_client, "login", lambda url, u, p: "tok")
+    pushed = []
+    monkeypatch.setattr(
+        secman_client, "push_vulnerability",
+        lambda url, token, **kw: pushed.append(kw) or {"operation": "CREATED"},
+    )
+
+    result = runner.invoke(app, ["push-to-secman", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert len(pushed) == 1
+    cve = pushed[0]["cve"]
+    assert "D" * 1000 not in cve
+    assert len(cve) < 300

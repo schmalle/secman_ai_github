@@ -676,6 +676,7 @@ def push_to_secman(
 
     from . import secman_client
     from .findings import fingerprint
+    from .issues import _FIELD_MAX, _truncate
 
     url = _resolve_secman_url(secman_url)
     username = _resolve_secman_username(secman_username)
@@ -718,7 +719,11 @@ def push_to_secman(
             if issue is not None:
                 first_seen = datetime.fromisoformat(issue.first_seen_at)
                 days_open = max(0, (datetime.now(timezone.utc) - first_seen).days)
-            cve = f"SECSCAN:{row['category'] or 'FINDING'}:{fp[:12]}"
+            # row["category"] is LLM output about untrusted repository content
+            # (see issues.py's _issue_body for the same concern on the GitHub
+            # issue path); cap it before it becomes part of the identifier
+            # pushed to secman's vulnerability tracker.
+            cve = f"SECSCAN:{_truncate(row['category'], _FIELD_MAX) or 'FINDING'}:{fp[:12]}"
             hostname = rec.full_name
 
             if dry_run:
