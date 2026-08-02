@@ -77,6 +77,12 @@ class RunConfig:
     db_ssl: bool = False  # encrypt the MySQL connection (no custom CA/cert/key)
     no_db: bool = False  # skip all DB storage; findings.csv still written, summary.csv skipped
     create_issues: bool = False  # open one GitHub issue per new High/Critical finding
+    # Push this invocation's High/Critical findings to the secman backend over HTTPS
+    # once the review is done; credentials come from --secman-* or SECMAN_* env.
+    push_to_secman: bool = False
+    secman_url: str | None = None
+    secman_username: str | None = None
+    secman_password: str | None = None
     # No external writes: no GitHub issues are opened and nothing is pushed to secman.
     # Reviews still run and local CSV/state is still written; see dryrun.py.
     dry_run: bool = False

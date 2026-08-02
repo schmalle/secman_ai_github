@@ -83,23 +83,22 @@ def _resolve_db_ssl(db_ssl: bool) -> bool:
     return os.environ.get("DB_SSL", "").strip().lower() in ("true", "1")
 
 
-def _resolve_secman_url(url: str | None) -> str | None:
-    import os
+_PUSH_TO_SECMAN_HELP = (
+    "After the review, push this invocation's High/Critical findings to the secman "
+    "backend over HTTPS (POST /api/vulnerabilities/cli-add). Requires the DB — cannot "
+    "combine with --no-db. Needs --secman-url/--secman-username/--secman-password. Only "
+    "the repositories reviewed here are pushed; use `secscan push-to-secman` for the "
+    "whole state DB."
+)
+_SECMAN_URL_HELP = "secman base URL, e.g. https://secman.example.com (or SECMAN_URL env)."
+_SECMAN_USERNAME_HELP = "secman username (or SECMAN_USERNAME env); needs the ADMIN or VULN role."
+_SECMAN_PASSWORD_HELP = "secman password (or SECMAN_PASSWORD env)."
 
-    return url or os.environ.get("SECMAN_URL") or None
-
-
-def _resolve_secman_username(username: str | None) -> str | None:
-    import os
-
-    return username or os.environ.get("SECMAN_USERNAME") or None
-
-
-def _resolve_secman_password(password: str | None) -> str | None:
-    import os
-
-    return password or os.environ.get("SECMAN_PASSWORD") or None
-
+_SECMAN_CREDS_MISSING = (
+    "secman URL/username/password required "
+    "(--secman-url/--secman-username/--secman-password or "
+    "SECMAN_URL/SECMAN_USERNAME/SECMAN_PASSWORD env vars)"
+)
 
 _DRY_RUN_HELP = (
     "Make no external writes: no GitHub issue is opened (with --create-issues, "
@@ -166,6 +165,10 @@ def _run_config(
     db_ssl: bool = False,
     no_db: bool = False,
     create_issues: bool = False,
+    push_to_secman: bool = False,
+    secman_url: str | None = None,
+    secman_username: str | None = None,
+    secman_password: str | None = None,
     dry_run: bool = False,
     issue_prefix: str = "secscan:",
     provider: str = "auto",
@@ -181,6 +184,25 @@ def _run_config(
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
     if no_db and email_to:
         raise ConfigError("--no-db and --email-to cannot be combined (the report is built from the state DB)")
+    if no_db and push_to_secman:
+        raise ConfigError(
+            "--no-db and --push-to-secman cannot be combined "
+            "(the push reads findings and first-seen dates from the DB)"
+        )
+    # Explicit credentials that would silently do nothing are a configuration error;
+    # SECMAN_* in the environment is not, since it is often exported process-wide.
+    if not push_to_secman and (secman_url or secman_username or secman_password):
+        raise ConfigError("--secman-url/--secman-username/--secman-password require --push-to-secman")
+    if push_to_secman:
+        from .secman_push import resolve_credentials
+
+        secman_url, secman_username, secman_password = resolve_credentials(
+            secman_url, secman_username, secman_password
+        )
+        # A dry run never logs in or posts, so it needs no credentials. Otherwise fail
+        # here, before an expensive review runs against an unconfigured push.
+        if not dry_run and not (secman_url and secman_username and secman_password):
+            raise ConfigError(_SECMAN_CREDS_MISSING)
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
@@ -190,6 +212,10 @@ def _run_config(
         db_ssl=db_ssl,
         no_db=no_db,
         create_issues=create_issues,
+        push_to_secman=push_to_secman,
+        secman_url=secman_url,
+        secman_username=secman_username,
+        secman_password=secman_password,
         dry_run=dry_run,
         issue_prefix=issue_prefix.strip(),
         filters=Filters(
@@ -243,6 +269,10 @@ def run(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
+    push_to_secman: bool = typer.Option(False, "--push-to-secman", help=_PUSH_TO_SECMAN_HELP),
+    secman_url: str = typer.Option(None, "--secman-url", help=_SECMAN_URL_HELP),
+    secman_username: str = typer.Option(None, "--secman-username", help=_SECMAN_USERNAME_HELP),
+    secman_password: str = typer.Option(None, "--secman-password", help=_SECMAN_PASSWORD_HELP),
     dry_run: bool = typer.Option(False, "--dry-run", help=_DRY_RUN_HELP),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
@@ -292,6 +322,8 @@ def run(
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
+            push_to_secman=push_to_secman, secman_url=secman_url,
+            secman_username=secman_username, secman_password=secman_password,
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -360,6 +392,18 @@ def list_repos(
 def review(
     path: Path = typer.Argument(..., help="Local repo directory to review."),
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV is written."),
+    store_db: bool = typer.Option(
+        False, "--store-db",
+        help=(
+            "Also record the result and its High/Critical findings in the state DB "
+            "under 'local/<dirname>', so stats / report / push-to-secman see it. "
+            "Off by default: review writes findings.csv only."
+        ),
+    ),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL (with --store-db); defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     model: str = typer.Option("sonnet", help=_MODEL_HELP),
     provider: str = typer.Option("auto", help=_PROVIDER_HELP),
     max_turns: int = typer.Option(60),
@@ -376,6 +420,9 @@ def review(
     cfg = _run_config(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, True, True, None,
+        db_url=_resolve_db_url(db_url), db_user=_resolve_db_user(db_user),
+        db_password=_resolve_db_password(db_password), db_ssl=_resolve_db_ssl(db_ssl),
+        no_db=not store_db,
         provider=provider, timeout_s=timeout,
     )
     asyncio.run(review_local(cfg, path))
@@ -391,6 +438,10 @@ def scan(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
+    push_to_secman: bool = typer.Option(False, "--push-to-secman", help=_PUSH_TO_SECMAN_HELP),
+    secman_url: str = typer.Option(None, "--secman-url", help=_SECMAN_URL_HELP),
+    secman_username: str = typer.Option(None, "--secman-username", help=_SECMAN_USERNAME_HELP),
+    secman_password: str = typer.Option(None, "--secman-password", help=_SECMAN_PASSWORD_HELP),
     dry_run: bool = typer.Option(False, "--dry-run", help=_DRY_RUN_HELP),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     model: str = typer.Option("sonnet", help=_MODEL_HELP),
@@ -431,6 +482,8 @@ def scan(
             False, False, 0, keep_clones, False, None,
             db_url=_resolve_db_url(db_url), db_user=db_user, db_password=db_password, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
+            push_to_secman=push_to_secman, secman_url=secman_url,
+            secman_username=secman_username, secman_password=secman_password,
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -719,81 +772,31 @@ def push_to_secman(
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env)."),
 ) -> None:
     """Push High/Critical findings from the state DB into secman via cli-add."""
-    from datetime import datetime, timezone
-
-    from . import secman_client
-    from .findings import fingerprint
-    from .issues import _FIELD_MAX, _truncate
+    from . import secman_client, secman_push
 
     dry_run = _enter_dry_run(dry_run)
 
-    url = _resolve_secman_url(secman_url)
-    username = _resolve_secman_username(secman_username)
-    password = _resolve_secman_password(secman_password)
+    url, username, password = secman_push.resolve_credentials(
+        secman_url, secman_username, secman_password
+    )
     # A dry run never logs in or posts, so it needs no secman credentials at all.
     if not dry_run and (not url or not username or not password):
-        typer.echo(
-            "Error: secman URL/username/password required "
-            "(--secman-url/--secman-username/--secman-password or "
-            "SECMAN_URL/SECMAN_USERNAME/SECMAN_PASSWORD env vars)",
-            err=True,
-        )
+        typer.echo(f"Error: {_SECMAN_CREDS_MISSING}", err=True)
         raise typer.Exit(1)
 
     if dry_run:
         typer.echo("Dry run: nothing will be written to secman.")
 
     store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
-    records = store.all_records()
 
-    token = None
-    if not dry_run:
-        try:
-            token = secman_client.login(url, username, password)
-        except secman_client.SecmanPushError as exc:
-            typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(1)
-
-    pushed = failed = 0
-    for rec in records:
-        for row in store.get_findings(rec.owner, rec.repo):
-            if row["severity"] not in ("critical", "high"):
-                continue
-
-            class _RowFinding:
-                severity = type("S", (), {"value": row["severity"]})()
-                category = row["category"]
-                title = row["title"]
-                file_path = row["file_path"]
-
-            fp = fingerprint(_RowFinding())
-            issue = store.find_issue(rec.owner, rec.repo, fp)
-            days_open = 0
-            if issue is not None:
-                first_seen = datetime.fromisoformat(issue.first_seen_at)
-                days_open = max(0, (datetime.now(timezone.utc) - first_seen).days)
-            # row["category"] is LLM output about untrusted repository content
-            # (see issues.py's _issue_body for the same concern on the GitHub
-            # issue path); cap it before it becomes part of the identifier
-            # pushed to secman's vulnerability tracker.
-            cve = f"SECSCAN:{_truncate(row['category'], _FIELD_MAX) or 'FINDING'}:{fp[:12]}"
-            hostname = rec.full_name
-
-            if dry_run:
-                typer.echo(f"would push {hostname} {cve} {row['severity'].upper()}")
-                pushed += 1
-                continue
-
-            try:
-                secman_client.push_vulnerability(
-                    url, token,
-                    hostname=hostname, cve=cve,
-                    criticality=row["severity"].upper(), days_open=days_open,
-                )
-                pushed += 1
-            except secman_client.SecmanPushError as exc:
-                typer.echo(f"failed: {hostname} {cve}: {exc}", err=True)
-                failed += 1
+    try:
+        pushed, failed = secman_push.push_records(
+            store, store.all_records(),
+            url=url, username=username, password=password, dry_run=dry_run,
+        )
+    except secman_client.SecmanPushError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
 
     verb = "would push" if dry_run else "pushed"
     typer.echo(f"{verb} {pushed}" + ("" if dry_run else f", failed {failed}"))

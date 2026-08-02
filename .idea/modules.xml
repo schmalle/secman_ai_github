@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/secman_ai_github.iml" filepath="$PROJECT_DIR$/.idea/secman_ai_github.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/secscan.iml" filepath="$PROJECT_DIR$/.idea/secscan.iml" />
     </modules>
   </component>
 </project>

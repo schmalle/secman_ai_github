@@ -58,6 +58,38 @@ def test_secman_client_refuses_to_login_or_push_while_armed():
         )
 
 
+def test_scan_push_to_secman_refuses_while_armed(tmp_path):
+    """scan / run push through the same guarded client: a caller that failed to
+    propagate the flag is stopped before anything reaches secman."""
+    from secscan.config import RunConfig
+    from secscan.findings import Finding
+    from secscan.orchestrator import _maybe_push_to_secman
+    from secscan.state import StateStore
+
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    store.record_result(
+        "octo", "demo",
+        critical=1, high=0, total=1,
+        duration_s=1.0, cost_usd=0.1, reviewed_at="2026-07-12T00:00:00+00:00",
+    )
+    store.replace_findings(
+        "octo", "demo",
+        [Finding(severity="critical", title="SQLi", description="d", file_path="a.py")],
+    )
+
+    # dry_run=False simulates a caller that failed to propagate the flag.
+    cfg = RunConfig(
+        output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3",
+        push_to_secman=True, dry_run=False,
+        secman_url="https://secman.example.com", secman_username="u", secman_password="p",
+    )
+
+    dryrun.activate()
+
+    with pytest.raises(dryrun.DryRunViolation):
+        _maybe_push_to_secman(cfg, store, ["octo/demo"])
+
+
 def test_issue_creation_refuses_while_armed(tmp_path):
     from secscan.findings import Finding
     from secscan.issues import process_finding

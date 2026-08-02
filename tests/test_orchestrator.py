@@ -556,3 +556,106 @@ async def test_scan_repo_emails_when_findings(tmp_path, monkeypatch):
     await orch.scan_repo(cfg, "octo", "demo")
 
     assert sent["to"] == ["sec@example.com"]
+
+
+# -- review (local dir) ----------------------------------------------------------
+
+
+def _local_repo_dir(tmp_path):
+    d = tmp_path / "demo-app"
+    d.mkdir()
+    return d
+
+
+def _patch_local_review(monkeypatch, result):
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        return result
+
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+
+    async def fake_head_commit(path):
+        return None
+
+    monkeypatch.setattr(orch, "head_commit", fake_head_commit)
+
+
+async def test_review_local_without_store_db_writes_no_state(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    repo_dir = _local_repo_dir(tmp_path)
+    _patch_local_review(monkeypatch, ReviewResult(repo_full_name="local/demo-app"))
+
+    out = tmp_path / "out"
+    cfg = RunConfig(output_dir=out, state_db=out / "secscan.sqlite3", no_db=True)
+    await orch.review_local(cfg, repo_dir)
+
+    assert (out / "local__demo-app" / "findings.csv").exists()
+    assert not (out / "secscan.sqlite3").exists()  # default stays CSV-only
+    assert not (out / "summary.csv").exists()
+
+
+async def test_review_local_store_db_records_result_and_findings(tmp_path, monkeypatch):
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    repo_dir = _local_repo_dir(tmp_path)
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+    _patch_local_review(monkeypatch, ReviewResult(
+        repo_full_name="local/demo-app",
+        findings=[finding], high_critical=[finding],
+        critical_count=0, high_count=1, total_findings=1,
+        duration_s=2.0, cost_usd=0.05,
+    ))
+
+    out = tmp_path / "out"
+    cfg = RunConfig(output_dir=out, state_db=out / "secscan.sqlite3", no_db=False)
+    await orch.review_local(cfg, repo_dir)
+
+    store = StateStore(cfg.state_target)
+    rec = store.get("local", "demo-app")
+    assert rec is not None
+    assert rec.status == orch.Status.DONE
+    assert (rec.high_count, rec.critical_count, rec.total_findings) == (1, 0, 1)
+    assert rec.cost_usd == 0.05
+    assert rec.reviewed_at
+    rows = store.get_findings("local", "demo-app")
+    assert [r["title"] for r in rows] == ["SQLi"]
+    assert (out / "summary.csv").exists()
+
+
+async def test_review_local_store_db_records_failure(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    repo_dir = _local_repo_dir(tmp_path)
+    _patch_local_review(monkeypatch, ReviewResult(
+        repo_full_name="local/demo-app", error="model returned no JSON",
+    ))
+
+    out = tmp_path / "out"
+    cfg = RunConfig(output_dir=out, state_db=out / "secscan.sqlite3", no_db=False)
+    await orch.review_local(cfg, repo_dir)
+
+    rec = StateStore(cfg.state_target).get("local", "demo-app")
+    assert rec.status == orch.Status.FAILED
+    assert "no JSON" in rec.error
+
+
+async def test_review_local_store_db_records_head_commit(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+
+    repo_dir = _local_repo_dir(tmp_path)
+    _patch_local_review(monkeypatch, ReviewResult(repo_full_name="local/demo-app"))
+
+    async def fake_head_commit(path):
+        assert path.name == "demo-app"  # the reviewed dir, not the output dir
+        return "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "2026-08-01"
+
+    monkeypatch.setattr(orch, "head_commit", fake_head_commit)
+
+    out = tmp_path / "out"
+    cfg = RunConfig(output_dir=out, state_db=out / "secscan.sqlite3", no_db=False)
+    await orch.review_local(cfg, repo_dir)
+
+    rec = StateStore(cfg.state_target).get("local", "demo-app")
+    assert rec.last_commit_sha == "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+    assert rec.last_commit_date == "2026-08-01"

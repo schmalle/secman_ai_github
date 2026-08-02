@@ -231,6 +231,33 @@ def _maybe_email_report(cfg: RunConfig, store: StateStore | None, run_high_criti
         typer.echo(f"Warning: failed to send email report: {exc}", err=True)
 
 
+def _maybe_push_to_secman(cfg: RunConfig, store: StateStore | None, full_names: list[str]) -> None:
+    """Push the High/Critical findings of the repos this invocation reviewed.
+
+    Only those repos — everything else in the state DB stays the job of the
+    standalone `push-to-secman` command. Runs after the findings are already
+    persisted, so a push failure never costs the review.
+    """
+    if not cfg.push_to_secman or store is None:
+        return
+    from . import secman_client, secman_push
+
+    wanted = set(full_names)
+    records = [r for r in store.all_records() if r.full_name in wanted]
+    try:
+        pushed, failed = secman_push.push_records(
+            store, records,
+            url=cfg.secman_url, username=cfg.secman_username,
+            password=cfg.secman_password, dry_run=cfg.dry_run,
+        )
+    except secman_client.SecmanPushError as exc:
+        typer.echo(f"Error: secman push failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+    verb = "would push" if cfg.dry_run else "pushed"
+    typer.echo(f"secman: {verb} {pushed}" + ("" if cfg.dry_run else f", failed {failed}"))
+
+
 async def run_scan(
     cfg: RunConfig,
     org: str | None = None,
@@ -294,12 +321,17 @@ async def run_scan(
         f"Done. summary={summary} | total review cost ${total_cost:.3f} | "
         f"{len(failed)} failed."
     )
+    _maybe_push_to_secman(cfg, store, [r.full_name for r in todo])
     # `if r` skips None from monkeypatched/cancelled tasks that return nothing
     _maybe_email_report(cfg, store, sum(r[0] + r[1] for r in results if r))
 
 
 async def review_local(cfg: RunConfig, path: Path) -> None:
-    """Review a single local repo directory (no GitHub, no state)."""
+    """Review a single local repo directory (no GitHub).
+
+    State is written only with --store-db (cfg.no_db False), under owner `local`
+    and the directory name — the same identity as the findings.csv it writes.
+    """
     path = Path(path).resolve()
     if not path.is_dir():
         raise typer.BadParameter(f"not a directory: {path}")
@@ -307,23 +339,54 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
     full_name = f"local/{name}"
     provider_env = _resolve_provider_env(cfg)
 
-    typer.echo(f"Reviewing {full_name} …")
-    res = await review_repo(
-        path, full_name, model=cfg.model, max_turns=cfg.max_turns,
-        max_cost_usd=cfg.max_cost_usd, extra_env=provider_env.env,
-        idle_timeout_s=cfg.timeout_s,
+    store = None if cfg.no_db else StateStore(
+        cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
     )
+    try:
+        typer.echo(f"Reviewing {full_name} …")
+        if store is not None:
+            commit = await head_commit(path)
+            if commit is not None:  # None when the directory is not a git repo
+                store.record_last_commit("local", name, commit[0], commit[1])
+            store.mark("local", name, Status.REVIEWING)
 
-    csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"
-    write_findings_csv(csv_path, full_name, res.high_critical)
+        res = await review_repo(
+            path, full_name, model=cfg.model, max_turns=cfg.max_turns,
+            max_cost_usd=cfg.max_cost_usd, extra_env=provider_env.env,
+            idle_timeout_s=cfg.timeout_s,
+        )
 
-    if res.error:
-        typer.echo(f"  ! review error: {res.error}")
-    typer.echo(
-        f"  {res.critical_count} critical, {res.high_count} high "
-        f"({res.total_findings} total) — ${res.cost_usd:.3f}, {res.num_turns} turns"
-    )
-    typer.echo(f"  CSV: {csv_path}")
+        csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"
+        write_findings_csv(csv_path, full_name, res.high_critical)
+
+        if store is not None:
+            store.replace_findings("local", name, res.high_critical)
+            if res.error and not res.findings:
+                store.record_failure("local", name, res.error)
+            else:
+                store.record_result(
+                    "local", name,
+                    critical=res.critical_count,
+                    high=res.high_count,
+                    total=res.total_findings,
+                    duration_s=res.duration_s,
+                    cost_usd=res.cost_usd,
+                    reviewed_at=_now(),
+                )
+
+        if res.error:
+            typer.echo(f"  ! review error: {res.error}")
+        typer.echo(
+            f"  {res.critical_count} critical, {res.high_count} high "
+            f"({res.total_findings} total) — ${res.cost_usd:.3f}, {res.num_turns} turns"
+        )
+        typer.echo(f"  CSV: {csv_path}")
+        if store is not None:
+            summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
+            typer.echo(f"  Stored as {full_name}; summary={summary}")
+    finally:
+        if store is not None:
+            store.close()
 
 
 async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
@@ -349,4 +412,5 @@ async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
 
     summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
     typer.echo(f"Done. summary={summary}")
+    _maybe_push_to_secman(cfg, store, [f"{owner}/{name}"])
     _maybe_email_report(cfg, store, critical + high)

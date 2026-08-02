@@ -65,9 +65,9 @@ the environment only and never written to disk.
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | SMTP credentials for `send-report` |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP server for `--email-provider custom` (port defaults to 587) |
 | `SMTP_FROM` | From address (defaults to `SMTP_USERNAME`) |
-| `SECMAN_URL` | secman base URL for `push-to-secman` (or `--secman-url`) |
-| `SECMAN_USERNAME` | secman username for `push-to-secman` (or `--secman-username`); needs ADMIN or VULN role |
-| `SECMAN_PASSWORD` | secman password for `push-to-secman` (or `--secman-password`) |
+| `SECMAN_URL` | secman base URL (or `--secman-url`), for `push-to-secman` and `scan`/`run --push-to-secman` |
+| `SECMAN_USERNAME` | secman username (or `--secman-username`); needs ADMIN or VULN role |
+| `SECMAN_PASSWORD` | secman password (or `--secman-password`) |
 | `SECSCAN_DRY_RUN` | `1`/`true`/`yes`/`on` forces `--dry-run` on `run`, `scan`, and `push-to-secman` |
 
 ## Usage
@@ -83,6 +83,7 @@ uv run secscan repo remove octo/webapp    # remove a target
 uv run secscan scan octo/webapp           # clone + review one remote repo on demand
 uv run secscan scan octo/webapp --branch develop   # review a specific branch
 uv run secscan review ./some/local/repo   # review one local dir (no GitHub)
+uv run secscan review ./some/local/repo --store-db   # …and record it in the state DB
 uv run secscan run --limit 1              # full pipeline, one repo (smoke test)
 uv run secscan run --org my-org           # scope to one org
 uv run secscan run --targets-only         # only scan 'repo add' targets (skip App enumeration)
@@ -95,11 +96,13 @@ uv run secscan send-report --email-to sec@example.com --email-provider gmail
 uv run secscan run --org my-org --email-to sec@example.com --email-provider gmail  # auto-email after scan
 uv run secscan push-to-secman                              # push High/Critical findings to secman
 uv run secscan push-to-secman --dry-run                    # preview only
+uv run secscan scan octo/webapp --push-to-secman           # review and push, in one step
+uv run secscan run --targets-only --push-to-secman         # same for a whole run
 uv run secscan run --dry-run                               # no issues opened, nothing pushed to secman
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --issue-prefix --keep-clones
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --store-db --create-issues --push-to-secman --secman-url --secman-username --secman-password --dry-run --issue-prefix --keep-clones
 --branch --no-resume --limit --targets-only --repos-file`.
 
 `list-repos` prints one tab-separated line per repo: `owner/name`, size in KB, then the
@@ -130,6 +133,17 @@ per-repo `findings.csv` is written; `summary.csv` is skipped since it's normally
 rebuilt from the state store. Useful for one-off scans where you don't want
 `output/secscan.sqlite3` (or a configured MySQL backend) touched at all.
 
+`--store-db` is the mirror image on `review`, which writes only `findings.csv` by
+default. With it, the local review is recorded like any scanned repo — under owner
+`local` and the directory name (`local/my-app`), with its High/Critical findings, the
+reviewed `git log -1` commit (blank if the directory is not a git repo), cost and
+duration — and `summary.csv` is rebuilt. `--db-url`, `--db-user`, `--db-password` and
+`--db-ssl` (or `SECSCAN_DB_URL` / `DB_USERNAME` / `DB_PASSWORD` / `DB_SSL`) select the
+database, exactly as on `run`/`scan`. Reviewing the same directory again replaces its
+findings, and `stats`, `report` and `push-to-secman` then see local reviews alongside
+GitHub ones. `--create-issues` remains `run`/`scan`-only — a local directory has no
+GitHub repo to file against.
+
 ## Dry run
 
 `--dry-run` (on `run`, `scan`, and `push-to-secman`) guarantees the command makes
@@ -141,10 +155,10 @@ rebuilt from the state store. Useful for one-off scans where you don't want
   bumped either). Without `--create-issues` nothing would be opened anyway, but
   the flag is still accepted and still enforced — so it's safe to pass
   unconditionally in a wrapper script.
-* **Nothing is written to secman.** `push-to-secman --dry-run` lists what it
-  would push without logging in or calling `cli-add` even once; because it never
-  contacts secman, it doesn't need `SECMAN_URL`/`SECMAN_USERNAME`/`SECMAN_PASSWORD`
-  to be set at all.
+* **Nothing is written to secman.** `push-to-secman --dry-run` — and
+  `scan`/`run --push-to-secman --dry-run` — list what they would push without
+  logging in or calling `cli-add` even once; because they never contact secman,
+  they don't need `SECMAN_URL`/`SECMAN_USERNAME`/`SECMAN_PASSWORD` to be set at all.
 
 Set `SECSCAN_DRY_RUN=1` (or `true`/`yes`/`on`) to force it for every command in
 an environment — useful in CI or a shared shell where an accidental real write
@@ -249,6 +263,28 @@ export SECMAN_PASSWORD=…
 uv run secscan push-to-secman --dry-run   # preview what would be pushed
 uv run secscan push-to-secman             # actually push
 ```
+
+Note that `--db-url`/`--db-user`/`--db-password` are unrelated to these: they
+configure secscan's *own* state store. secman is only ever reached over HTTPS.
+
+### Pushing straight from a scan
+
+`scan` and `run` accept `--push-to-secman` and the same three credential options
+(`--secman-url`, `--secman-username`, `--secman-password`, each falling back to
+its `SECMAN_*` environment variable), so a review and its push are one command:
+
+```bash
+uv run secscan scan octo/webapp --push-to-secman
+uv run secscan run --targets-only --push-to-secman --secman-url https://secman.example.com
+```
+
+Only the repositories that invocation reviewed are pushed — repos skipped by
+`--resume` are not, and neither is anything else already in the state DB. Use
+`push-to-secman` for that. Credentials are validated before the review starts, so
+a misconfigured push never wastes an LLM run; `--no-db` cannot be combined with
+`--push-to-secman`, since the push reads findings and first-seen dates from the
+state store. A login failure exits non-zero *after* `findings.csv`, state, and any
+GitHub issues are written, so nothing is lost and `push-to-secman` can retry.
 
 `--dry-run` makes zero login/`cli-add` calls, so nothing reaches secman and no
 secman credentials are needed — see [Dry run](#dry-run).
