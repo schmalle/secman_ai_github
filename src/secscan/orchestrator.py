@@ -115,7 +115,8 @@ def _create_issues_sync(
 def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
     provider_env = resolve_provider(cfg.provider)
     if provider_env.name != "anthropic":
-        typer.echo(f"Reviews routed through {provider_env.name}.")
+        where = f" ({provider_env.endpoint})" if provider_env.endpoint else ""
+        typer.echo(f"Reviews routed through {provider_env.name}{where}.")
     cfg.model = resolve_model(provider_env, cfg.model)
     hint = model_hint(provider_env, cfg.model)
     if hint:

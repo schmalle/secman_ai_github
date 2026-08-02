@@ -25,6 +25,20 @@ app = typer.Typer(
     help="Run autonomous Claude Code security reviews across GitHub App repositories.",
 )
 
+# Shared by --provider/--model on run/review/scan (see providers.py for the details).
+_PROVIDER_HELP = (
+    "anthropic|openrouter|kimi|copilot|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY "
+    "is set, else Kimi if MOONSHOT_API_KEY is set, else Anthropic; kimi: Moonshot's "
+    "Anthropic-compatible endpoint; copilot: a local Copilot bridge at COPILOT_BASE_URL, "
+    "default http://localhost:4141; usecc: force the locally authenticated Claude Code "
+    "session, ignoring every provider key plus ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
+)
+_MODEL_HELP = (
+    "Model for reviews; the default alias maps per provider (OpenRouter: a slug like "
+    "anthropic/claude-sonnet-4.5; Kimi: an ID like kimi-k2.7-code; Copilot: an ID like "
+    "claude-sonnet-4.5 or gpt-4.1)."
+)
+
 
 repo_app = typer.Typer(
     add_completion=False,
@@ -205,15 +219,8 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
-    model: str = typer.Option("sonnet", help="Claude model for reviews (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
-    provider: str = typer.Option(
-        "auto",
-        help=(
-            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
-            "usecc: force the locally authenticated Claude Code session, ignoring "
-            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
-        ),
-    ),
+    model: str = typer.Option("sonnet", help=_MODEL_HELP),
+    provider: str = typer.Option("auto", help=_PROVIDER_HELP),
     max_turns: int = typer.Option(60, help="Max agent turns per repo review."),
     max_cost_usd: float = typer.Option(None, help="Per-repo cost abort threshold (USD)."),
     timeout: float = typer.Option(
@@ -305,15 +312,8 @@ def list_repos(
 def review(
     path: Path = typer.Argument(..., help="Local repo directory to review."),
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV is written."),
-    model: str = typer.Option("sonnet"),
-    provider: str = typer.Option(
-        "auto",
-        help=(
-            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
-            "usecc: force the locally authenticated Claude Code session, ignoring "
-            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
-        ),
-    ),
+    model: str = typer.Option("sonnet", help=_MODEL_HELP),
+    provider: str = typer.Option("auto", help=_PROVIDER_HELP),
     max_turns: int = typer.Option(60),
     max_cost_usd: float = typer.Option(None),
     timeout: float = typer.Option(
@@ -345,15 +345,8 @@ def scan(
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --create-issues: preview what would be created/skipped, making zero GitHub API calls or DB writes."),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
-    model: str = typer.Option("sonnet", help="Claude model for the review (OpenRouter: a slug like anthropic/claude-sonnet-4.5)."),
-    provider: str = typer.Option(
-        "auto",
-        help=(
-            "anthropic|openrouter|auto|usecc (auto: OpenRouter if OPENROUTER_API_KEY is set; "
-            "usecc: force the locally authenticated Claude Code session, ignoring "
-            "OPENROUTER_API_KEY/ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL)."
-        ),
-    ),
+    model: str = typer.Option("sonnet", help=_MODEL_HELP),
+    provider: str = typer.Option("auto", help=_PROVIDER_HELP),
     max_turns: int = typer.Option(60, help="Max agent turns for the review."),
     max_cost_usd: float = typer.Option(None, help="Cost abort threshold (USD)."),
     timeout: float = typer.Option(
