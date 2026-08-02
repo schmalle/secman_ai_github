@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from secscan.cloner import CloneError, build_clone_command, cleanup, clone_repo
+from secscan.cloner import CloneError, build_clone_command, cleanup, clone_repo, head_commit
 from secscan.github_app import RepoInfo
 
 
@@ -77,6 +77,35 @@ async def test_clone_repo_missing_branch_raises_clone_error(tmp_path):
     repo = _local_repo(tmp_path)
     with pytest.raises(CloneError):
         await clone_repo(repo, "tok", tmp_path / "clones", branch="does-not-exist")
+
+
+@needs_git
+async def test_head_commit_returns_full_sha_and_iso_date(tmp_path):
+    repo = _local_repo(tmp_path)
+    dest = await clone_repo(repo, "tok", tmp_path / "clones")
+    sha, date = await head_commit(dest)
+    assert len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)
+    assert date == subprocess.run(
+        ["git", "log", "-1", "--format=%cs"], cwd=dest, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@needs_git
+async def test_head_commit_reflects_the_checked_out_branch(tmp_path):
+    repo = _local_repo(tmp_path)
+    main = await clone_repo(repo, "tok", tmp_path / "clones-main")
+    dev = await clone_repo(repo, "tok", tmp_path / "clones-dev", branch="dev")
+    assert (await head_commit(main))[0] != (await head_commit(dev))[0]
+
+
+async def test_head_commit_returns_none_outside_a_repo(tmp_path):
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert await head_commit(plain) is None
+
+
+async def test_head_commit_returns_none_for_missing_directory(tmp_path):
+    assert await head_commit(tmp_path / "gone") is None
 
 
 def test_cleanup_removes_tree(tmp_path):

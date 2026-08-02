@@ -43,6 +43,8 @@ class RepoRecord:
     cost_usd: float = 0.0
     reviewed_at: str = ""
     error: str = ""
+    last_commit_sha: str = ""
+    last_commit_date: str = ""
 
     @property
     def full_name(self) -> str:
@@ -74,6 +76,8 @@ CREATE TABLE IF NOT EXISTS repos (
     cost_usd       REAL NOT NULL DEFAULT 0,
     reviewed_at    TEXT NOT NULL DEFAULT '',
     error          TEXT NOT NULL DEFAULT '',
+    last_commit_sha  TEXT NOT NULL DEFAULT '',
+    last_commit_date TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (owner, repo)
 );
 """
@@ -90,6 +94,8 @@ CREATE TABLE IF NOT EXISTS repos (
     cost_usd       DOUBLE NOT NULL DEFAULT 0,
     reviewed_at    VARCHAR(64) NOT NULL DEFAULT '',
     error          TEXT,
+    last_commit_sha  VARCHAR(64) NOT NULL DEFAULT '',
+    last_commit_date VARCHAR(32) NOT NULL DEFAULT '',
     PRIMARY KEY (owner, repo)
 );
 """
@@ -174,23 +180,40 @@ CREATE TABLE IF NOT EXISTS issue_tracking (
 """
 
 
+# Columns added to `repos` after the table shipped. `CREATE TABLE IF NOT EXISTS` is a
+# no-op on a database that already has the table, so these are applied separately and
+# the "column already exists" error is swallowed — see _ensure_columns.
+_MIGRATIONS_SQLITE = (
+    "ALTER TABLE repos ADD COLUMN last_commit_sha TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE repos ADD COLUMN last_commit_date TEXT NOT NULL DEFAULT ''",
+)
+
+_MIGRATIONS_MYSQL = (
+    "ALTER TABLE repos ADD COLUMN last_commit_sha VARCHAR(64) NOT NULL DEFAULT ''",
+    "ALTER TABLE repos ADD COLUMN last_commit_date VARCHAR(32) NOT NULL DEFAULT ''",
+)
+
+
 @dataclass(frozen=True)
 class _Dialect:
     placeholder: str
     insert_ignore: str
     schema: tuple[str, ...]
+    migrations: tuple[str, ...]
 
 
 _SQLITE_DIALECT = _Dialect(
     placeholder="?",
     insert_ignore="INSERT OR IGNORE INTO",
     schema=(_REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE, _ISSUE_TRACKING_SQLITE),
+    migrations=_MIGRATIONS_SQLITE,
 )
 
 _MYSQL_DIALECT = _Dialect(
     placeholder="%s",
     insert_ignore="INSERT IGNORE INTO",
     schema=(_REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL, _ISSUE_TRACKING_MYSQL),
+    migrations=_MIGRATIONS_MYSQL,
 )
 
 
@@ -280,6 +303,24 @@ class StateStore:
         for stmt in self._d.schema:
             cur.execute(stmt)
         self._conn.commit()
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """Add post-release columns to a database created by an older secscan.
+
+        Each ALTER is independent and idempotent: on a database that already has the
+        column, the driver raises (SQLite "duplicate column name", MySQL error 1060)
+        and we move on. Broad except by design — the alternative is dialect-specific
+        error-code matching for a statement whose only expected failure is "already
+        applied", and a genuinely broken database fails loudly on the first real query.
+        """
+        for stmt in self._d.migrations:
+            cur = self._conn.cursor()
+            try:
+                cur.execute(stmt)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
 
     def close(self) -> None:
         self._conn.close()
@@ -368,6 +409,20 @@ class StateStore:
             cost_usd=cost_usd,
             reviewed_at=reviewed_at,
             error="",
+        )
+
+    def record_last_commit(self, owner: str, repo: str, sha: str, date: str) -> None:
+        """Record the repo's latest commit without touching its scan status.
+
+        Deliberately not routed through mark(), which writes `status`: listing a
+        repository is not scanning it, so a `list-repos` run must never move a done
+        repo back to pending.
+        """
+        self.upsert_pending(owner, repo)
+        self._exec(
+            "UPDATE repos SET last_commit_sha = ?, last_commit_date = ? "
+            "WHERE owner = ? AND repo = ?",
+            (sha, date, owner, repo),
         )
 
     def record_failure(self, owner: str, repo: str, error: str) -> None:
@@ -540,4 +595,6 @@ class StateStore:
             cost_usd=row["cost_usd"],
             reviewed_at=row["reviewed_at"],
             error=row["error"] or "",
+            last_commit_sha=row["last_commit_sha"] or "",
+            last_commit_date=row["last_commit_date"] or "",
         )

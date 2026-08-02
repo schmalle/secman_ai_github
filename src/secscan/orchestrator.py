@@ -15,7 +15,7 @@ from github import Auth, Github
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from . import dryrun
-from .cloner import CloneError, cleanup, clone_repo
+from .cloner import CloneError, cleanup, clone_repo, head_commit
 from .config import RunConfig
 from .findings import write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
@@ -146,6 +146,9 @@ async def _process_repo(
             path = await _clone(repo, token, _clone_root(cfg), cfg.branch)
 
             if store is not None:
+                commit = await head_commit(path)
+                if commit is not None:  # unreadable HEAD must never fail a scan
+                    store.record_last_commit(owner, name, commit[0], commit[1])
                 store.mark(owner, name, Status.REVIEWING)
             res = await review_repo(
                 path,

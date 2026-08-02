@@ -68,6 +68,29 @@ async def clone_repo(
     return dest
 
 
+async def head_commit(path: Path) -> tuple[str, str] | None:
+    """(full sha, committer date as YYYY-MM-DD) of the clone's HEAD, or None.
+
+    Read from the working tree rather than the GitHub API: it costs nothing and it
+    describes the commit actually reviewed, including when --branch selected a
+    non-default branch. None when `path` is not a readable git repository.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "log", "-1", "--format=%H%x09%cs",
+            cwd=str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return None  # path missing, or git not installed
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    sha, _, date = stdout.decode("utf-8", "replace").strip().partition("\t")
+    return (sha, date) if sha and date else None
+
+
 def cleanup(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 

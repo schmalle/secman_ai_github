@@ -265,6 +265,65 @@ async def test_process_repo_skips_store_when_no_db(tmp_path, monkeypatch):
     assert (tmp_path / "octo__demo" / "findings.csv").exists()
 
 
+async def _patch_clone_and_review(monkeypatch, tmp_path):
+    """Stub out token minting, cloning and the review so _process_repo runs offline."""
+    from secscan.reviewer import ReviewResult
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+        return ReviewResult(repo_full_name=full_name)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+
+async def test_process_repo_records_head_commit_of_the_clone(tmp_path, monkeypatch):
+    await _patch_clone_and_review(monkeypatch, tmp_path)
+
+    async def fake_head_commit(path):
+        return "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "2026-07-15"
+
+    monkeypatch.setattr(orch, "head_commit", fake_head_commit)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3")
+    store = StateStore(cfg.state_target)
+    await orch._process_repo(
+        _repo(name="demo"), object(), store, cfg, asyncio.Semaphore(1),
+        orch.ProviderEnv(name="anthropic"),
+    )
+
+    rec = store.get("octo", "demo")
+    assert rec.last_commit_sha == "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+    assert rec.last_commit_date == "2026-07-15"
+
+
+async def test_process_repo_unreadable_head_commit_does_not_fail_the_scan(tmp_path, monkeypatch):
+    await _patch_clone_and_review(monkeypatch, tmp_path)
+
+    async def fake_head_commit(path):
+        return None
+
+    monkeypatch.setattr(orch, "head_commit", fake_head_commit)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3")
+    store = StateStore(cfg.state_target)
+    await orch._process_repo(
+        _repo(name="demo"), object(), store, cfg, asyncio.Semaphore(1),
+        orch.ProviderEnv(name="anthropic"),
+    )
+
+    rec = store.get("octo", "demo")
+    assert rec.status == orch.Status.DONE  # review completed regardless
+    assert rec.last_commit_sha == ""
+
+
 async def test_run_scan_no_db_skips_summary_csv(tmp_path, monkeypatch, capsys):
     fake_app = _FakeApp()
     monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=fake_app))

@@ -75,8 +75,8 @@ the environment only and never written to disk.
 ```bash
 uv sync                                   # install deps into .venv
 
-uv run secscan list-repos                 # preview what would be scanned
-uv run secscan list-repos --last-commit   # …and each repo's latest commit
+uv run secscan list-repos                    # preview what would be scanned, with each repo's latest commit
+uv run secscan list-repos --no-last-commit   # skip the commit lookup (one API call per repo faster)
 uv run secscan repo add octo/webapp       # add an explicit scan target (stored in DB)
 uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
@@ -102,11 +102,19 @@ Common flags: `--include-archived --include-forks --max-size-mb --concurrency
 --model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --create-issues --dry-run --issue-prefix --keep-clones
 --branch --no-resume --limit --targets-only --repos-file`.
 
-`list-repos` prints one tab-separated line per repo (`owner/name`, size in KB).
-`--last-commit` appends the latest commit on the branch GitHub reports as HEAD
-(short SHA and `YYYY-MM-DD` date, or `-` `-` if the repo is empty or unreadable)
-— it costs one
-extra API call per repo, so it is off by default.
+`list-repos` prints one tab-separated line per repo: `owner/name`, size in KB, then the
+latest commit on the branch GitHub reports as HEAD — short SHA and `YYYY-MM-DD` date, or
+`-` `-` if the repo is empty or unreadable. Each commit found is also recorded in the
+state DB (`last_commit_sha`, `last_commit_date` on the `repos` table) without disturbing
+the repo's scan status; `--output-dir`, `--db-url`, `--db-user`, `--db-password` and
+`--db-ssl` select the database, and `--no-db` prints without storing.
+
+The commit lookup costs one extra API call per repo. `--no-last-commit` skips it — the
+line is then just `owner/name` and size, and nothing is written to the DB.
+
+`run` and `scan` record the same two columns for every repo they clone, read from the
+clone itself (`git log -1`), so they cost no extra API calls and reflect the branch
+actually reviewed.
 
 `--branch` (on `run` and `scan`) selects the branch to clone and review. Without it,
 each repo's default branch is used (whatever GitHub reports as HEAD — `main` for most

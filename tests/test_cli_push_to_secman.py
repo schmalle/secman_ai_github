@@ -156,6 +156,17 @@ def test_push_to_secman_long_category_is_truncated(tmp_path, monkeypatch):
     monkeypatch.setattr(
         secman_client, "push_vulnerability",
         lambda url, token, **kw: pushed.append(kw) or {"operation": "CREATED"},
+    )
+
+    result = runner.invoke(app, ["push-to-secman", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert len(pushed) == 1
+    cve = pushed[0]["cve"]
+    assert "D" * 1000 not in cve
+    assert len(cve) < 300
+
+
 def test_push_to_secman_dry_run_via_env(tmp_path, monkeypatch):
     _seed(tmp_path)
     _secman_env(monkeypatch)
@@ -170,10 +181,6 @@ def test_push_to_secman_dry_run_via_env(tmp_path, monkeypatch):
     result = runner.invoke(app, ["push-to-secman", "--output-dir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert len(pushed) == 1
-    cve = pushed[0]["cve"]
-    assert "D" * 1000 not in cve
-    assert len(cve) < 300
     assert "would push 2" in result.output
 
 

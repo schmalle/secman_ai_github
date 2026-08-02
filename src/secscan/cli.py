@@ -311,28 +311,49 @@ def list_repos(
     include_forks: bool = typer.Option(False),
     max_size_mb: int = typer.Option(500),
     last_commit: bool = typer.Option(
-        False, "--last-commit",
-        help="Append the latest default-branch commit (short SHA, date); one extra API call per repo.",
+        True, "--last-commit/--no-last-commit",
+        help="Append the latest default-branch commit (short SHA, date). On by default; "
+             "it costs one extra API call per repo, so --no-last-commit is the fast path.",
     ),
+    output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+    no_db: bool = typer.Option(False, "--no-db", help="Print only; do not record the last commit in the state DB."),
 ) -> None:
     """Print the repositories that would be scanned (no cloning, no review)."""
     from .github_auth import build_auth
+    from .state import StateStore
 
     filters = Filters(include_archived=include_archived, include_forks=include_forks, max_size_mb=max_size_mb)
     auth = build_auth()
-    seen: set[str] = set()
-    for client in (auth.app, auth.pat):
-        if client is None:
-            continue
-        for repo in client.iter_repositories(org=org, filters=filters):
-            if repo.full_name in seen:
-                continue  # App entry wins; PAT duplicates are dropped
-            seen.add(repo.full_name)
-            line = f"{repo.full_name}\t{repo.size_kb} KB"
-            if last_commit:
-                lc = client.last_commit(repo)
-                line += f"\t{lc[0][:7]}\t{lc[1]}" if lc else "\t-\t-"
-            typer.echo(line)
+    # Without --last-commit there is nothing new to record, so no store is opened.
+    store = None if no_db or not last_commit else StateStore(
+        _resolve_db_url(db_url) or (output_dir / "secscan.sqlite3"),
+        db_user=_resolve_db_user(db_user),
+        db_password=_resolve_db_password(db_password),
+        db_ssl=_resolve_db_ssl(db_ssl),
+    )
+    try:
+        seen: set[str] = set()
+        for client in (auth.app, auth.pat):
+            if client is None:
+                continue
+            for repo in client.iter_repositories(org=org, filters=filters):
+                if repo.full_name in seen:
+                    continue  # App entry wins; PAT duplicates are dropped
+                seen.add(repo.full_name)
+                line = f"{repo.full_name}\t{repo.size_kb} KB"
+                if last_commit:
+                    lc = client.last_commit(repo)
+                    line += f"\t{lc[0][:7]}\t{lc[1]}" if lc else "\t-\t-"
+                    if lc and store is not None:
+                        store.record_last_commit(repo.owner, repo.name, lc[0], lc[1])
+                typer.echo(line)
+    finally:
+        if store is not None:
+            store.close()
 
 
 @app.command()

@@ -99,6 +99,79 @@ def test_record_result_marks_done_with_counts(tmp_path):
     assert store.is_done("octo", "repo")
 
 
+def test_record_last_commit_round_trip(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.record_last_commit("octo", "repo", "a1b2c3d4e5f6", "2026-07-15")
+    rec = store.get("octo", "repo")
+    assert rec.last_commit_sha == "a1b2c3d4e5f6"
+    assert rec.last_commit_date == "2026-07-15"
+
+
+def test_record_last_commit_creates_pending_row_for_unknown_repo(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.record_last_commit("octo", "unseen", "a1b2c3d4e5f6", "2026-07-15")
+    assert store.get("octo", "unseen").status == Status.PENDING
+
+
+def test_record_last_commit_preserves_scan_status_and_counts(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.record_result(
+        "octo", "repo",
+        critical=2, high=3, total=5,
+        duration_s=10.0, cost_usd=0.5, reviewed_at="2026-06-30T00:00:00Z",
+    )
+    store.record_last_commit("octo", "repo", "a1b2c3d4e5f6", "2026-07-15")
+    rec = store.get("octo", "repo")
+    assert rec.status == Status.DONE  # listing a repo is not scanning it
+    assert rec.critical_count == 2
+    assert rec.reviewed_at == "2026-06-30T00:00:00Z"
+
+
+_LEGACY_REPOS_SQLITE = """
+CREATE TABLE repos (
+    owner          TEXT NOT NULL,
+    repo           TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending',
+    critical_count INTEGER NOT NULL DEFAULT 0,
+    high_count     INTEGER NOT NULL DEFAULT 0,
+    total_findings INTEGER NOT NULL DEFAULT 0,
+    duration_s     REAL NOT NULL DEFAULT 0,
+    cost_usd       REAL NOT NULL DEFAULT 0,
+    reviewed_at    TEXT NOT NULL DEFAULT '',
+    error          TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo)
+);
+"""
+
+
+def _legacy_db(path):
+    """A database created before the last_commit columns existed."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute(_LEGACY_REPOS_SQLITE)
+    conn.execute("INSERT INTO repos (owner, repo, status) VALUES ('octo', 'old', 'done')")
+    conn.commit()
+    conn.close()
+
+
+def test_opening_legacy_db_adds_last_commit_columns(tmp_path):
+    db = tmp_path / "legacy.sqlite3"
+    _legacy_db(db)
+    store = StateStore(db)
+    store.record_last_commit("octo", "old", "a1b2c3d4e5f6", "2026-07-15")
+    rec = store.get("octo", "old")
+    assert rec.last_commit_sha == "a1b2c3d4e5f6"
+    assert rec.status == Status.DONE  # the pre-existing row survived the migration
+
+
+def test_migration_is_idempotent_across_instances(tmp_path):
+    db = tmp_path / "legacy.sqlite3"
+    _legacy_db(db)
+    StateStore(db).record_last_commit("octo", "old", "a1b2c3d4e5f6", "2026-07-15")
+    assert StateStore(db).get("octo", "old").last_commit_date == "2026-07-15"
+
+
 def test_record_failure(tmp_path):
     store = StateStore(tmp_path / "s.sqlite3")
     store.upsert_pending("octo", "repo")
