@@ -88,10 +88,10 @@ def test_no_db_defaults_false():
 from secscan.config import ConfigError
 
 
-def test_create_issues_and_issue_dry_run_default_false():
+def test_create_issues_and_dry_run_default_false():
     cfg = RunConfig()
     assert cfg.create_issues is False
-    assert cfg.issue_dry_run is False
+    assert cfg.dry_run is False
 
 
 def test_run_config_rejects_no_db_with_create_issues():
