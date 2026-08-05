@@ -1,3 +1,4 @@
+import base64
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,6 +28,42 @@ def test_build_clone_command_with_branch():
     i = cmd.index("--branch")
     assert cmd[i + 1] == "dev"
     assert cmd[-2:] == ["https://github.com/o/r.git", "/tmp/o__r"]
+
+
+async def test_clone_repo_keeps_token_out_of_argv(tmp_path, monkeypatch):
+    """The token must reach git via env (http.extraHeader), never as part of the
+    clone URL/argv — a URL-embedded token would sit in `ps`/`/proc/<pid>/cmdline`
+    for as long as the clone runs, which for a long-lived PAT is a much bigger
+    exposure window than a one-hour App installation token."""
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def _fake_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        return _FakeProc()
+
+    monkeypatch.setattr("secscan.cloner.asyncio.create_subprocess_exec", _fake_exec)
+
+    repo = RepoInfo(
+        owner="octo", name="demo", full_name="octo/demo",
+        archived=False, fork=False, size_kb=1, default_branch="main",
+        clone_url="https://github.com/octo/demo.git", installation_id=1,
+    )
+    await clone_repo(repo, "ghs_supersecret", tmp_path / "clones")
+
+    assert not any("ghs_supersecret" in part for part in captured["cmd"])
+    assert "https://github.com/octo/demo.git" in captured["cmd"]
+
+    env = captured["env"]
+    assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    expected = base64.b64encode(b"x-access-token:ghs_supersecret").decode()
+    assert env["GIT_CONFIG_VALUE_0"] == f"Authorization: Basic {expected}"
 
 
 def _local_repo(tmp_path: Path) -> RepoInfo:
