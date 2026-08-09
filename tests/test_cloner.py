@@ -1,19 +1,65 @@
+import base64
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from secscan.cloner import CloneError, build_clone_command, cleanup, clone_repo, head_commit
+from secscan.cloner import (
+    CloneError,
+    _auth_header_env,
+    build_clone_command,
+    cleanup,
+    clone_repo,
+    head_commit,
+)
 from secscan.github_app import RepoInfo
 
 
 def test_build_clone_command_is_shallow_and_noninteractive():
-    cmd = build_clone_command("https://x-access-token:tok@github.com/o/r.git", Path("/tmp/o__r"))
+    cmd = build_clone_command("https://github.com/o/r.git", Path("/tmp/o__r"))
     assert cmd[:2] == ["git", "clone"]
     assert "--depth" in cmd and "1" in cmd
     assert "--single-branch" in cmd
     assert cmd[-1] == "/tmp/o__r"
+
+
+def test_auth_header_env_carries_token_only_via_env_not_url_or_argv():
+    env = _auth_header_env("ghs_supersecret")
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    decoded = base64.b64decode(env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")).decode()
+    assert decoded == "x-access-token:ghs_supersecret"
+
+
+async def test_clone_repo_never_puts_the_token_in_the_subprocess_argv():
+    """Regression test: the token must reach git via env, never as a URL/argv element
+    (argv is world-visible via `ps`/`/proc/<pid>/cmdline`)."""
+    repo = RepoInfo(
+        owner="octo", name="demo", full_name="octo/demo",
+        archived=False, fork=False, size_kb=1, default_branch="main",
+        clone_url="https://github.com/octo/demo.git", installation_id=1,
+    )
+    captured = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.returncode = 0
+        return proc
+
+    with patch("secscan.cloner.asyncio.create_subprocess_exec", side_effect=fake_exec):
+        with patch("secscan.cloner.Path.mkdir"), patch("secscan.cloner.Path.exists", return_value=False):
+            await clone_repo(repo, "ghs_supersecret", Path("/tmp/clones"))
+
+    assert not any("ghs_supersecret" in str(part) for part in captured["cmd"])
+    assert captured["env"]["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    header = captured["env"]["GIT_CONFIG_VALUE_0"]
+    decoded = base64.b64decode(header.removeprefix("Authorization: Basic ")).decode()
+    assert decoded == "x-access-token:ghs_supersecret"
 
 
 def test_build_clone_command_without_branch_has_no_branch_flag():

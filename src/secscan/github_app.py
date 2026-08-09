@@ -56,11 +56,6 @@ def should_include(repo: RepoInfo, filters: Filters, org: str | None) -> bool:
     return True
 
 
-def authed_clone_url(clone_url: str, token: str) -> str:
-    """Insert an installation token into an https clone URL for git authentication."""
-    return clone_url.replace("https://", f"https://x-access-token:{token}@", 1)
-
-
 def redact_url(url: str) -> str:
     """Strip any embedded credentials so a URL is safe to log."""
     return re.sub(r"https://[^@/]+@", "https://***@", url)

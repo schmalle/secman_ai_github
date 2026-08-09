@@ -7,7 +7,6 @@ from secscan.config import Filters, GithubAppConfig
 from secscan.github_app import (
     GithubAppClient,
     RepoInfo,
-    authed_clone_url,
     fetch_last_commit,
     redact_url,
     should_include,
@@ -74,11 +73,6 @@ def test_org_filter():
     f = Filters()
     assert should_include(_repo(owner="octo"), f, org="other") is False
     assert should_include(_repo(owner="octo"), f, org="octo") is True
-
-
-def test_authed_clone_url_injects_token():
-    url = authed_clone_url("https://github.com/octo/repo.git", "ghs_secret")
-    assert url == "https://x-access-token:ghs_secret@github.com/octo/repo.git"
 
 
 def test_redact_url_hides_token():

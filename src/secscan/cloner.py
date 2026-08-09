@@ -1,18 +1,24 @@
 """Shallow-clone a repository using a short-lived installation token, then clean up.
 
-Tokens are injected into the clone URL only for the git invocation and are never logged;
-errors are redacted before they propagate.
+The token is passed to git via an `http.extraheader` Authorization header injected
+through `GIT_CONFIG_*` environment variables (git >= 2.31) rather than embedded in the
+clone URL. A URL-embedded token is a plain positional argv element, so for the
+lifetime of the `git clone` subprocess it would be readable by any local user/process
+via `ps` or `/proc/<pid>/cmdline`; the environment-variable form is restricted to the
+process owner. The token is never logged, and clone-failure errors are redacted before
+they propagate.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from .github_app import RepoInfo, authed_clone_url, redact_url
+from .github_app import RepoInfo, redact_url
 
 
 class CloneError(Exception):
@@ -42,6 +48,20 @@ def _dest_dir(root: Path, repo: RepoInfo) -> Path:
     return Path(root) / f"{repo.owner}__{repo.name}"
 
 
+def _auth_header_env(token: str) -> dict[str, str]:
+    """GIT_CONFIG_* env vars that set `http.extraheader` to a Basic-auth token.
+
+    Equivalent to embedding `x-access-token:{token}@` in the clone URL, but the
+    token only ever lives in the subprocess's environment, never its argv.
+    """
+    creds = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {creds}",
+    }
+
+
 async def clone_repo(
     repo: RepoInfo, token: str, dest_root: Path, branch: str | None = None
 ) -> Path:
@@ -51,9 +71,8 @@ async def clone_repo(
         shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    url = authed_clone_url(repo.clone_url, token)
-    cmd = build_clone_command(url, dest, branch)
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    cmd = build_clone_command(repo.clone_url, dest, branch)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **_auth_header_env(token)}
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
