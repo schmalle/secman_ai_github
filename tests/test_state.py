@@ -1,3 +1,5 @@
+import sqlite3
+
 from secscan.findings import Finding
 from secscan.state import (
     IssueRecord, RepoRecord, StateStore, Status, _dialect_for, _mysql_connect_kwargs,
@@ -485,3 +487,81 @@ def test_clear_stats_keeps_targets_and_issue_tracking(tmp_path):
 def test_clear_stats_on_empty_db_is_a_no_op(tmp_path):
     store = StateStore(tmp_path / "s.sqlite3")
     assert store.clear_stats() == (0, 0)
+
+
+# -- github_users -----------------------------------------------------------------
+
+
+def _github_user(login, org="acme", repo="", **kw):
+    from secscan.github_users import GithubUser
+
+    defaults = dict(
+        user_id=1, name="", email="", user_type="User", site_admin=False,
+        source="repo" if repo else "org", role="member", html_url="",
+    )
+    defaults.update(kw)
+    return GithubUser(login=login, org=org, repo=repo, **defaults)
+
+
+def test_replace_users_round_trips(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_users(
+        "acme", "",
+        [_github_user("alice", role="admin", site_admin=True), _github_user("bob")],
+        seen_at="2026-08-09T00:00:00+00:00",
+    )
+
+    rows = store.get_users()
+
+    assert [(r["login"], r["role"], r["source"]) for r in rows] == [
+        ("alice", "admin", "org"),
+        ("bob", "member", "org"),
+    ]
+    assert rows[0]["site_admin"] == 1
+    assert rows[0]["seen_at"] == "2026-08-09T00:00:00+00:00"
+    store.close()
+
+
+def test_replace_users_drops_departed_members_within_the_scope(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_users("acme", "", [_github_user("alice"), _github_user("bob")])
+
+    store.replace_users("acme", "", [_github_user("alice")])
+
+    assert [r["login"] for r in store.get_users()] == ["alice"]
+    store.close()
+
+
+def test_replace_users_leaves_other_scopes_alone(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_users("acme", "", [_github_user("alice")])
+    store.replace_users("acme", "webapp", [_github_user("bob", repo="webapp", role="write")])
+
+    store.replace_users("acme", "", [])  # the org listing emptied
+
+    assert [(r["repo"], r["login"]) for r in store.get_users()] == [("webapp", "bob")]
+    store.close()
+
+
+def test_get_users_filters_by_org_and_repo(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.replace_users("acme", "", [_github_user("alice")])
+    store.replace_users("acme", "webapp", [_github_user("bob", repo="webapp")])
+    store.replace_users("other", "", [_github_user("carol", org="other")])
+
+    assert [r["login"] for r in store.get_users(org="acme")] == ["alice", "bob"]
+    assert [r["login"] for r in store.get_users(org="acme", repo="webapp")] == ["bob"]
+    assert [r["login"] for r in store.get_users(org="nobody")] == []
+    store.close()
+
+
+def test_github_users_table_is_created_on_a_pre_existing_database(tmp_path):
+    """A database from before this feature must gain the table, not error on first use."""
+    db = tmp_path / "s.sqlite3"
+    StateStore(db).close()
+    sqlite3.connect(db).execute("DROP TABLE github_users").connection.commit()
+
+    store = StateStore(db)
+
+    assert store.get_users() == []
+    store.close()

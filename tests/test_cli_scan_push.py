@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 import secscan.orchestrator as orch
 import secscan.secman_client as secman_client
 from secscan.cli import app
-from secscan.config import RunConfig
+from secscan.config import GithubHost, RunConfig
 from secscan.findings import Finding
 from secscan.state import StateStore
 
@@ -186,9 +186,10 @@ def test_scan_push_dry_run_needs_no_credentials(tmp_path, monkeypatch):
 
 
 class _FakeAuth:
-    def __init__(self, app=None, pat=None):
+    def __init__(self, app=None, pat=None, host=None):
         self.app = app
         self.pat = pat
+        self.host = host or GithubHost()
 
 
 def _record(store, owner, name):
@@ -214,7 +215,7 @@ def _stub_review(monkeypatch):
         return (1, 0)
 
     monkeypatch.setattr(orch, "_process_repo", fake_process_repo)
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth())
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth())
     monkeypatch.setattr(
         orch, "resolve_target",
         lambda owner, name, auth: __import__("secscan.github_app", fromlist=["RepoInfo"]).RepoInfo(
@@ -323,7 +324,7 @@ class _FakeApp:
 
 async def test_run_scan_pushes_every_repo_it_reviewed(tmp_path, monkeypatch):
     _stub_review(monkeypatch)
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=_FakeApp()))
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(app=_FakeApp()))
     pushed = []
     _stub_client(monkeypatch, pushed)
 
@@ -340,7 +341,7 @@ async def test_run_scan_pushes_every_repo_it_reviewed(tmp_path, monkeypatch):
 
 async def test_run_scan_does_not_push_repos_skipped_by_resume(tmp_path, monkeypatch):
     _stub_review(monkeypatch)
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=_FakeApp()))
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(app=_FakeApp()))
     pushed = []
     _stub_client(monkeypatch, pushed)
 

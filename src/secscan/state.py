@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
     from .findings import Finding
+    from .github_users import GithubUser
 
 
 class Status(str, Enum):
@@ -180,6 +181,46 @@ CREATE TABLE IF NOT EXISTS issue_tracking (
 """
 
 
+_GITHUB_USERS_SQLITE = """
+CREATE TABLE IF NOT EXISTS github_users (
+    org        TEXT NOT NULL,
+    repo       TEXT NOT NULL DEFAULT '',
+    login      TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    role       TEXT NOT NULL DEFAULT '',
+    user_id    INTEGER NOT NULL DEFAULT 0,
+    name       TEXT NOT NULL DEFAULT '',
+    email      TEXT NOT NULL DEFAULT '',
+    user_type  TEXT NOT NULL DEFAULT '',
+    site_admin INTEGER NOT NULL DEFAULT 0,
+    html_url   TEXT NOT NULL DEFAULT '',
+    seen_at    TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (org, repo, login)
+);
+"""
+
+# `repo` is '' for an org-members row, so (org, repo, login) is a single key covering
+# both listings. The three key columns total 3060 bytes under utf8mb4 — inside InnoDB's
+# 3072-byte index limit, but that is why they are not wider.
+_GITHUB_USERS_MYSQL = """
+CREATE TABLE IF NOT EXISTS github_users (
+    org        VARCHAR(255) NOT NULL,
+    repo       VARCHAR(255) NOT NULL DEFAULT '',
+    login      VARCHAR(255) NOT NULL,
+    source     VARCHAR(32) NOT NULL DEFAULT '',
+    role       VARCHAR(32) NOT NULL DEFAULT '',
+    user_id    BIGINT NOT NULL DEFAULT 0,
+    name       TEXT NOT NULL,
+    email      VARCHAR(320) NOT NULL DEFAULT '',
+    user_type  VARCHAR(32) NOT NULL DEFAULT '',
+    site_admin TINYINT(1) NOT NULL DEFAULT 0,
+    html_url   TEXT NOT NULL,
+    seen_at    VARCHAR(64) NOT NULL DEFAULT '',
+    PRIMARY KEY (org, repo, login)
+);
+"""
+
+
 # Columns added to `repos` after the table shipped. `CREATE TABLE IF NOT EXISTS` is a
 # no-op on a database that already has the table, so these are applied separately and
 # the "column already exists" error is swallowed — see _ensure_columns.
@@ -205,14 +246,20 @@ class _Dialect:
 _SQLITE_DIALECT = _Dialect(
     placeholder="?",
     insert_ignore="INSERT OR IGNORE INTO",
-    schema=(_REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE, _ISSUE_TRACKING_SQLITE),
+    schema=(
+        _REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE, _ISSUE_TRACKING_SQLITE,
+        _GITHUB_USERS_SQLITE,
+    ),
     migrations=_MIGRATIONS_SQLITE,
 )
 
 _MYSQL_DIALECT = _Dialect(
     placeholder="%s",
     insert_ignore="INSERT IGNORE INTO",
-    schema=(_REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL, _ISSUE_TRACKING_MYSQL),
+    schema=(
+        _REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL, _ISSUE_TRACKING_MYSQL,
+        _GITHUB_USERS_MYSQL,
+    ),
     migrations=_MIGRATIONS_MYSQL,
 )
 
@@ -475,6 +522,59 @@ class StateStore:
             (owner, repo),
         )
         return [dict(r) for r in cur.fetchall()]
+
+    # -- GitHub users -------------------------------------------------------------
+
+    _USER_COLS = (
+        "org", "repo", "login", "source", "role", "user_id",
+        "name", "email", "user_type", "site_admin", "html_url", "seen_at",
+    )
+
+    def replace_users(
+        self, org: str, repo: str, users: "Iterable[GithubUser]", seen_at: str = ""
+    ) -> int:
+        """Replace the stored users for one scope (delete-then-insert), one transaction.
+
+        The scope is `(org, "")` for an org-members listing and `(owner, name)` for a
+        repo's collaborators. Delete-then-insert rather than upsert so somebody who left
+        the org disappears from the table instead of lingering forever. Returns the
+        number of rows inserted.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            self._ph("DELETE FROM github_users WHERE org = ? AND repo = ?"), (org, repo)
+        )
+        rows = [
+            (
+                u.org, u.repo, u.login, u.source, u.role, u.user_id,
+                u.name, u.email, u.user_type, int(bool(u.site_admin)), u.html_url, seen_at,
+            )
+            for u in users
+        ]
+        if rows:
+            cols = ", ".join(self._USER_COLS)
+            marks = ", ".join("?" for _ in self._USER_COLS)
+            cur.executemany(
+                self._ph(f"INSERT INTO github_users ({cols}) VALUES ({marks})"), rows
+            )
+        self._conn.commit()
+        return len(rows)
+
+    def get_users(self, org: str | None = None, repo: str | None = None) -> list[dict]:
+        """Stored users, optionally narrowed to an org and/or a repo name."""
+        sql = "SELECT * FROM github_users"
+        params: list = []
+        where = []
+        if org is not None:
+            where.append("org = ?")
+            params.append(org)
+        if repo is not None:
+            where.append("repo = ?")
+            params.append(repo)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY org, repo, login"
+        return [dict(r) for r in self._exec(sql, tuple(params)).fetchall()]
 
     # -- GitHub issue dedup -------------------------------------------------------
 

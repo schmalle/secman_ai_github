@@ -14,11 +14,19 @@ as the "clone with the PAT" sentinel.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator
 
-from .config import ConfigError, Filters, GithubAppConfig, GithubPatConfig, _env
+from .config import (
+    ConfigError,
+    Filters,
+    GithubAppConfig,
+    GithubHost,
+    GithubPatConfig,
+    _env,
+)
 from .github_app import GithubAppClient, RepoInfo, fetch_last_commit, should_include
+from .github_users import GithubUser, iter_org_members, iter_repo_collaborators
 
 
 class GithubPatClient:
@@ -33,7 +41,7 @@ class GithubPatClient:
         if self._gh is None:
             from github import Auth, Github
 
-            self._gh = Github(auth=Auth.Token(self._config.token))
+            self._gh = Github(auth=Auth.Token(self._config.token), base_url=self._config.host.api_url)
         return self._gh
 
     def token_for(self, repo: RepoInfo) -> str:
@@ -64,13 +72,22 @@ class GithubPatClient:
             return None
         return RepoInfo.from_github_repo(repo, installation_id=0)
 
+    def iter_org_members(self, org: str) -> Iterator[GithubUser]:
+        """Members of `org` with their role (same interface as GithubAppClient)."""
+        return iter_org_members(self.gh, org)
+
+    def iter_repo_collaborators(self, full_name: str) -> Iterator[GithubUser]:
+        """Collaborators on `owner/name` (same interface as GithubAppClient)."""
+        return iter_repo_collaborators(self.gh, full_name)
+
 
 @dataclass
 class AuthContext:
-    """Whichever GitHub credentials are configured (at least one)."""
+    """Whichever GitHub credentials are configured (at least one), and which GitHub."""
 
     app: GithubAppClient | None = None
     pat: GithubPatClient | None = None
+    host: GithubHost = field(default_factory=GithubHost)
 
     def token_for(self, repo: RepoInfo) -> str:
         """Token that can clone this repo: App installation token, else the PAT."""
@@ -81,15 +98,21 @@ class AuthContext:
         raise ConfigError(f"no credentials can clone {repo.full_name}")
 
 
-def build_auth() -> AuthContext:
-    """Build the auth context from the environment (App and/or PAT)."""
-    app = GithubAppClient(GithubAppConfig.from_env()) if _env("GITHUB_APP_ID") else None
-    pat = GithubPatClient(GithubPatConfig.from_env()) if _env("GITHUB_TOKEN") else None
+def build_auth(api_url: str | None = None) -> AuthContext:
+    """Build the auth context from the environment (App and/or PAT).
+
+    `api_url` selects the GitHub deployment (Enterprise Cloud, Enterprise Cloud with
+    data residency, or Enterprise Server). It beats `GITHUB_API_URL`, which in turn
+    beats the public/Enterprise Cloud default. See `config.normalize_github_urls`.
+    """
+    host = GithubHost.resolve(api_url)
+    app = GithubAppClient(GithubAppConfig.from_env(api_url)) if _env("GITHUB_APP_ID") else None
+    pat = GithubPatClient(GithubPatConfig.from_env(api_url)) if _env("GITHUB_TOKEN") else None
     if app is None and pat is None:
         raise ConfigError(
             "GitHub credentials required: set GITHUB_APP_ID (+ private key) or GITHUB_TOKEN"
         )
-    return AuthContext(app=app, pat=pat)
+    return AuthContext(app=app, pat=pat, host=host)
 
 
 def resolve_target(owner: str, name: str, auth: AuthContext) -> RepoInfo:
@@ -106,6 +129,8 @@ def resolve_target(owner: str, name: str, auth: AuthContext) -> RepoInfo:
         fork=False,
         size_kb=0,
         default_branch="",
-        clone_url=f"https://github.com/{owner}/{name}.git",
+        # The web host, not the API host — Enterprise Server and data-residency tenants
+        # serve git from a different hostname than api.github.com.
+        clone_url=f"{auth.host.web_url}/{owner}/{name}.git",
         installation_id=0,
     )

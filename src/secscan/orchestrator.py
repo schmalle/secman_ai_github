@@ -16,7 +16,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from . import dryrun
 from .cloner import CloneError, cleanup, clone_repo, head_commit
-from .config import RunConfig
+from .config import DEFAULT_API_URL, RunConfig
 from .findings import write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
 from .github_auth import AuthContext, build_auth, resolve_target
@@ -86,7 +86,7 @@ def _merge_scope(
 
 def _create_issues_sync(
     token: str, repo: RepoInfo, store: StateStore, owner: str, name: str,
-    findings: list, dry_run: bool, prefix: str,
+    findings: list, dry_run: bool, prefix: str, api_url: str = DEFAULT_API_URL,
 ) -> tuple[int, int]:
     """Blocking: mint a Github client, resolve the repo, and process each finding.
 
@@ -98,7 +98,7 @@ def _create_issues_sync(
     """
     gh_repo = None
     if not dry_run:
-        gh_client = Github(auth=Auth.Token(token))
+        gh_client = Github(auth=Auth.Token(token), base_url=api_url)
         gh_repo = gh_client.get_repo(repo.full_name)
     created = skipped = 0
     for finding in findings:
@@ -168,7 +168,7 @@ async def _process_repo(
             if store is not None and cfg.create_issues and res.high_critical:
                 created, skipped = await asyncio.to_thread(
                     _create_issues_sync, token, repo, store, owner, name,
-                    res.high_critical, cfg.dry_run, cfg.issue_prefix,
+                    res.high_critical, cfg.dry_run, cfg.issue_prefix, auth.host.api_url,
                 )
                 verb = "would create" if cfg.dry_run else "created"
                 skip_verb = "would skip" if cfg.dry_run else "skipped"
@@ -265,7 +265,7 @@ async def run_scan(
     targets_only: bool = False,
 ) -> None:
     _announce_dry_run(cfg)
-    auth = build_auth()
+    auth = build_auth(cfg.github_api_url)
     store = None if cfg.no_db else StateStore(
         cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
     )
@@ -392,7 +392,7 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
 async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
     """Clone, review, and record one remote repo by name (no enumeration)."""
     _announce_dry_run(cfg)
-    auth = build_auth()
+    auth = build_auth(cfg.github_api_url)
     store = None if cfg.no_db else StateStore(
         cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
     )

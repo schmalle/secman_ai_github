@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 import secscan.orchestrator as orch
-from secscan.config import RunConfig
+from secscan.config import GithubHost, RunConfig
 from secscan.github_app import RepoInfo
 from secscan.orchestrator import _merge_scope
 from secscan.state import StateStore
@@ -72,9 +72,10 @@ class _FakeApp:
 
 
 class _FakeAuth:
-    def __init__(self, app=None, pat=None):
+    def __init__(self, app=None, pat=None, host=None):
         self.app = app
         self.pat = pat
+        self.host = host or GithubHost()
 
 
 def test_resolve_provider_env_upgrades_default_model_for_openrouter(monkeypatch, capsys):
@@ -100,7 +101,7 @@ def test_resolve_provider_env_leaves_anthropic_model_untouched(monkeypatch):
 
 async def test_run_scan_targets_only_skips_enumeration(tmp_path, monkeypatch):
     fake_app = _FakeApp()
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=fake_app))
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(app=fake_app))
 
     processed = []
 
@@ -211,7 +212,7 @@ async def test_process_repo_clone_defaults_to_no_branch(tmp_path, monkeypatch):
 
 
 async def test_scan_repo_processes_single_repo_and_writes_summary(tmp_path, monkeypatch):
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=None, pat=None))
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(app=None, pat=None))
 
     calls = []
 
@@ -326,7 +327,7 @@ async def test_process_repo_unreadable_head_commit_does_not_fail_the_scan(tmp_pa
 
 async def test_run_scan_no_db_skips_summary_csv(tmp_path, monkeypatch, capsys):
     fake_app = _FakeApp()
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=fake_app))
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(app=fake_app))
 
     async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
         pass
@@ -383,7 +384,7 @@ async def test_process_repo_creates_issues_when_enabled(
     monkeypatch.setattr(orch, "_clone", fake_clone)
     monkeypatch.setattr(orch, "review_repo", fake_review_repo)
     monkeypatch.setattr(orch, "cleanup", lambda path: None)
-    monkeypatch.setattr(orch_module, "Github", lambda auth: _FakeGithubClient())
+    monkeypatch.setattr(orch_module, "Github", lambda auth, base_url=None: _FakeGithubClient())
 
     cfg = RunConfig(
         output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", create_issues=True,
@@ -394,6 +395,8 @@ async def test_process_repo_creates_issues_when_enabled(
     provider_env = orch.ProviderEnv(name="anthropic")
 
     class _FakeAuthCtx:
+        host = GithubHost()
+
         def token_for(self, repo):
             return "tok"
 
@@ -447,6 +450,8 @@ async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypat
     provider_env = orch.ProviderEnv(name="anthropic")
 
     class _FakeAuthCtx:
+        host = GithubHost()
+
         def token_for(self, repo):
             return "tok"
 
@@ -472,7 +477,7 @@ def _email_cfg(tmp_path, **kw):
 
 async def _run_targets_only(monkeypatch, cfg, per_repo_result):
     """Run run_scan in targets-only mode with one seeded target and a fake reviewer."""
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=None))
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(app=None))
 
     async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
         return per_repo_result
@@ -540,7 +545,7 @@ async def test_run_scan_no_email_flag_never_sends(tmp_path, monkeypatch):
 
 
 async def test_scan_repo_emails_when_findings(tmp_path, monkeypatch):
-    monkeypatch.setattr(orch, "build_auth", lambda: _FakeAuth(app=None, pat=None))
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(app=None, pat=None))
 
     async def fake_process_repo(repo, auth, store, cfg, sem, provider_env):
         return (1, 2)

@@ -12,6 +12,7 @@ from secscan.github_app import (
     redact_url,
     should_include,
 )
+from secscan.github_users import OrgAccessError
 
 
 def _repo(owner="octo", name="repo", archived=False, fork=False, size_kb=1000):
@@ -122,3 +123,96 @@ def test_app_client_last_commit_uses_installation_client():
     client._integration = SimpleNamespace(get_github_for_installation=_get_github_for_installation)
     assert client.last_commit(_repo()) == ("a1b2c3d4e5f6", "2026-07-15")
     assert seen == [1]  # _repo() carries installation_id=1
+
+
+# -- GitHub deployment (Enterprise Cloud / Enterprise Server) ----------------------
+
+
+@pytest.mark.parametrize(
+    "api_url,expected_base",
+    [
+        (None, "https://api.github.com"),                              # Enterprise Cloud
+        ("https://acme.ghe.com", "https://api.acme.ghe.com"),          # GHEC data residency
+        ("https://ghes.example.com", "https://ghes.example.com/api/v3"),  # Enterprise Server
+    ],
+)
+def test_app_client_points_pygithub_at_the_configured_deployment(api_url, expected_base):
+    from secscan.config import GithubHost
+
+    # A real RSA key is needed because GithubIntegration signs a JWT on construction.
+    private_key = _rsa_private_key()
+    client = GithubAppClient(
+        GithubAppConfig(app_id="123", private_key=private_key, host=GithubHost.resolve(api_url))
+    )
+    assert client.integration.base_url == expected_base
+
+
+def _rsa_private_key() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
+# -- user listings ----------------------------------------------------------------
+
+
+def _app_client_with_installations(installations, github_by_id=None):
+    client = GithubAppClient(GithubAppConfig(app_id="123", private_key="fake-pem"))
+    client._integration = SimpleNamespace(
+        get_installations=lambda: installations,
+        get_github_for_installation=lambda i: (github_by_id or {}).get(i),
+    )
+    return client
+
+
+def _installation(login, installation_id=7):
+    return SimpleNamespace(id=installation_id, account=SimpleNamespace(login=login))
+
+
+def test_github_for_account_picks_the_matching_installation():
+    marker = SimpleNamespace(name="installation-scoped client")
+    client = _app_client_with_installations(
+        [_installation("other", 1), _installation("Acme", 7)], {7: marker}
+    )
+    assert client.github_for_account("acme") is marker
+
+
+def test_github_for_account_raises_when_the_app_is_not_installed():
+    client = _app_client_with_installations([_installation("other", 1)])
+    with pytest.raises(OrgAccessError, match="no installation on 'acme'"):
+        client.github_for_account("acme")
+
+
+def test_app_client_iter_org_members_uses_the_installation_client():
+    members = [
+        SimpleNamespace(login="alice", id=1, name=None, email=None, type="User",
+                        site_admin=False, html_url="")
+    ]
+    installation_gh = SimpleNamespace(
+        get_organization=lambda org: SimpleNamespace(
+            get_members=lambda role=None: (members if role != "admin" else members)
+        )
+    )
+    client = _app_client_with_installations([_installation("acme")], {7: installation_gh})
+    assert [(u.login, u.role) for u in client.iter_org_members("acme")] == [("alice", "admin")]
+
+
+def test_app_client_iter_repo_collaborators_resolves_the_owner_installation():
+    collaborators = [
+        SimpleNamespace(login="bob", id=2, name=None, email=None, type="User",
+                        site_admin=False, html_url="", role_name="admin")
+    ]
+    installation_gh = SimpleNamespace(
+        get_repo=lambda full_name: SimpleNamespace(
+            get_collaborators=lambda affiliation=None: collaborators
+        )
+    )
+    client = _app_client_with_installations([_installation("acme")], {7: installation_gh})
+    users = list(client.iter_repo_collaborators("acme/webapp"))
+    assert [(u.login, u.role, u.repo) for u in users] == [("bob", "admin", "webapp")]

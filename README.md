@@ -34,6 +34,12 @@ treated as untrusted data (prompt-injection aware).
     **Contents: Read**, **Metadata: Read**. You need its App ID and a private key (`.pem`).
   - A **personal access token** (`GITHUB_TOKEN`) with read access to the repos you
     want to scan (classic: `repo` scope; fine-grained: Contents + Metadata read).
+  - For `list-users` only, the credential also needs to see organization membership:
+    a PAT with the `read:org` scope (classic) or Members: Read (fine-grained), held by
+    a member of the org; or a GitHub App with the **Organization permission
+    Members: Read**, installed on that org.
+- Works against github.com, GitHub Enterprise Cloud (including data residency) and
+  GitHub Enterprise Server — see [GitHub Enterprise](#github-enterprise-cloud-and-server).
 - (Optional) MySQL/MariaDB backend: install the client system libs
   (macOS `brew install mysql-client`; Debian/Ubuntu
   `apt-get install default-libmysqlclient-dev pkg-config`), then
@@ -50,6 +56,7 @@ the environment only and never written to disk.
 | `GITHUB_APP_PRIVATE_KEY` | PEM contents, or… |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | …path to the `.pem` file |
 | `GITHUB_TOKEN` | Personal access token — alternative or complement to the App |
+| `GITHUB_API_URL` | GitHub deployment (or `--github-api-url`); unset = github.com / Enterprise Cloud. See [GitHub Enterprise](#github-enterprise-cloud-and-server) |
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
 | `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
 | `MOONSHOT_API_KEY` | Route reviews through Kimi (Moonshot); `KIMI_API_KEY` works too. Auto-selected when set and no OpenRouter key is present |
@@ -77,6 +84,10 @@ uv sync                                   # install deps into .venv
 
 uv run secscan list-repos                    # preview what would be scanned, with each repo's latest commit
 uv run secscan list-repos --no-last-commit   # skip the commit lookup (one API call per repo faster)
+uv run secscan list-users --org my-org       # org members and their roles
+uv run secscan list-users --repo octo/webapp # one repo's collaborators and permissions
+uv run secscan list-users --org my-org --org-repos --format json   # members + every repo's collaborators
+uv run secscan list-repos --github-api-url https://ghes.example.com   # GitHub Enterprise Server
 uv run secscan repo add octo/webapp       # add an explicit scan target (stored in DB)
 uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
@@ -103,7 +114,8 @@ uv run secscan run --dry-run                               # no issues opened, n
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
 --model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --store-db --create-issues --push-to-secman --secman-url --secman-username --secman-password --dry-run --issue-prefix --keep-clones
---branch --no-resume --limit --targets-only --repos-file`.
+--branch --no-resume --limit --targets-only --repos-file --github-api-url --org-repos
+--format --output --no-csv`.
 
 `list-repos` prints one tab-separated line per repo: `owner/name`, size in KB, then the
 latest commit on the branch GitHub reports as HEAD — short SHA and `YYYY-MM-DD` date, or
@@ -194,6 +206,84 @@ Either credential works alone; together they complement each other.
 PAT-only mode deliberately does **not** scan everything the token can see — a
 personal token often reaches thousands of repos, and an accidental full scan is a
 cost hazard. Add repos explicitly (`secscan repo add`), or pass `--repos-file`.
+
+## GitHub Enterprise (Cloud and Server)
+
+`secscan` talks to whichever GitHub deployment `--github-api-url` (or `GITHUB_API_URL`)
+names. It applies to **every** command that reaches GitHub — `run`, `scan`,
+`list-repos`, `list-users` — not just the one you pass it to, and it covers API calls,
+issue creation, and the URLs repositories are cloned from.
+
+| Deployment | What to pass | Resulting API host |
+|---|---|---|
+| github.com / **Enterprise Cloud** | nothing | `https://api.github.com` |
+| **Enterprise Cloud with data residency** | `https://TENANT.ghe.com` | `https://api.TENANT.ghe.com` |
+| **Enterprise Server** (self-hosted) | `https://ghes.example.com` | `https://ghes.example.com/api/v3` |
+
+Enterprise Cloud on github.com is the default and needs no configuration at all — the
+flag exists for the other two. The web host and the API host are derived from each
+other, so either one is accepted: `https://acme.ghe.com` and `https://api.acme.ghe.com`
+mean the same thing, and the `/api/v3` suffix Enterprise Server needs is added for you
+(passing it yourself is fine too). A trailing slash is ignored; a URL with no scheme, or
+with some other path, is rejected with a message listing the accepted forms rather than
+failing later as a 404.
+
+```bash
+uv run secscan list-users --org my-org --github-api-url https://ghes.example.com
+GITHUB_API_URL=https://acme.ghe.com uv run secscan run --org my-org
+```
+
+The credential itself does not change: `GITHUB_APP_ID` + private key, or `GITHUB_TOKEN`,
+issued by that deployment.
+
+## Listing organization users
+
+`secscan list-users` reads the usernames GitHub associates with an organization. It is
+**read-only** — nothing is written to GitHub — and works identically on all three
+deployments above.
+
+```bash
+uv run secscan list-users --org my-org                     # members, with admin/member
+uv run secscan list-users --repo my-org/webapp             # that repo's collaborators
+uv run secscan list-users --org my-org --org-repos         # members + every repo's collaborators
+uv run secscan list-users --org my-org --format json --output users.json
+```
+
+Two listings feed it:
+
+| Source | GitHub API | `role` column |
+|---|---|---|
+| `--org` | `GET /orgs/{org}/members` | `admin` or `member` |
+| `--repo`, `--org-repos` | `GET /repos/{owner}/{repo}/collaborators` | `admin`, `maintain`, `write`, `triage`, `read` |
+
+**These APIs exist only for organizations.** A personal account has no members, and
+`--org` against one fails with an explanatory message and exit code 1 — that is the API
+saying "not an organization", not a bug. `--org-repos` requires `--org`; at least one of
+`--org` / `--repo` (repeatable) must be given.
+
+**Prerequisite:** the credential must be allowed to see membership — a PAT with
+`read:org` (classic) or Members: Read (fine-grained) held by a member of the org, or a
+GitHub App with the **Organization permission Members: Read** installed on that org.
+Existing App installations require re-approval after that permission is added. With both
+credentials configured, the App is asked first and the PAT is the fallback, so an org the
+App is not installed on is still listed if the token can see it.
+
+Output goes three places at once:
+
+* **stdout** — tab-separated `source`, `org` or `org/repo`, `login`, `role`, `type`,
+  `name`. `--format csv` or `--format json` replaces the table (`--output FILE` writes it
+  to a file instead of stdout).
+* **`<output-dir>/users.csv`** — always written unless `--no-csv`, with the full column
+  set (`source, org, repo, login, role, user_type, site_admin, user_id, name, email,
+  html_url`).
+* **the state DB** — the `github_users` table, keyed on `(org, repo, login)`, unless
+  `--no-db`. Each listing replaces its own scope, so somebody who left the org disappears
+  on the next run rather than lingering. `stats reset` does not touch it.
+
+**Known limitation:** these REST endpoints return GitHub identities only. SAML/SCIM
+external identities on Enterprise Cloud and LDAP DNs on Enterprise Server are *not*
+exposed here, and `email` is `null` (stored as an empty string) for most users unless the
+caller is an organization owner.
 
 ## Scan targets
 
@@ -536,7 +626,8 @@ clears the stats for everyone using it.
 output/
   <owner>__<repo>/findings.csv   # High + Critical findings for that repo
   summary.csv                    # one row per repo: counts, status, cost, duration
-  secscan.sqlite3                # state + findings + targets + issue tracking (unless --db-url)
+  users.csv                      # org members + repo collaborators (secscan list-users)
+  secscan.sqlite3                # state + findings + targets + issue tracking + users (unless --db-url)
   _clones/                       # working clones, deleted after each review unless --keep-clones
 ```
 
