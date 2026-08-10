@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from secscan.cli import _resolve_db_password, _resolve_db_ssl, _resolve_db_url, _resolve_db_user
 from secscan.config import RunConfig
 
@@ -104,3 +106,75 @@ def test_run_config_rejects_no_db_with_create_issues():
             max_cost_usd=None, include_archived=False, include_forks=False, max_size_mb=0,
             keep_clones=True, resume=False, limit=None, no_db=True, create_issues=True,
         )
+
+
+# -- GitHub deployment URLs -------------------------------------------------------
+
+
+def test_normalize_github_urls_defaults_to_public_github():
+    from secscan.config import normalize_github_urls
+
+    assert normalize_github_urls(None) == ("https://api.github.com", "https://github.com")
+    assert normalize_github_urls("") == ("https://api.github.com", "https://github.com")
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        # Enterprise Cloud (SaaS) on github.com — the API lives on an api. subdomain.
+        ("https://github.com", ("https://api.github.com", "https://github.com")),
+        ("https://api.github.com", ("https://api.github.com", "https://github.com")),
+        ("https://github.com/", ("https://api.github.com", "https://github.com")),
+        # Enterprise Cloud with data residency — same api. subdomain shape.
+        ("https://acme.ghe.com", ("https://api.acme.ghe.com", "https://acme.ghe.com")),
+        ("https://api.acme.ghe.com", ("https://api.acme.ghe.com", "https://acme.ghe.com")),
+        ("  https://api.acme.ghe.com/  ", ("https://api.acme.ghe.com", "https://acme.ghe.com")),
+        # Enterprise Server — the API lives on an /api/v3 path of the same host.
+        (
+            "https://ghes.example.com",
+            ("https://ghes.example.com/api/v3", "https://ghes.example.com"),
+        ),
+        (
+            "https://ghes.example.com/api/v3",
+            ("https://ghes.example.com/api/v3", "https://ghes.example.com"),
+        ),
+        (
+            "https://ghes.example.com/api/v3/",
+            ("https://ghes.example.com/api/v3", "https://ghes.example.com"),
+        ),
+        ("http://ghes.internal", ("http://ghes.internal/api/v3", "http://ghes.internal")),
+    ],
+)
+def test_normalize_github_urls_handles_every_deployment(value, expected):
+    from secscan.config import normalize_github_urls
+
+    assert normalize_github_urls(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value", ["ftp://ghes.example.com", "github.com", "https://ghes.example.com/api", "https://"]
+)
+def test_normalize_github_urls_rejects_unusable_input(value):
+    from secscan.config import ConfigError, normalize_github_urls
+
+    with pytest.raises(ConfigError):
+        normalize_github_urls(value)
+
+
+def test_github_host_resolve_reads_env(monkeypatch):
+    from secscan.config import GithubHost
+
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com")
+    assert GithubHost.resolve().api_url == "https://ghes.example.com/api/v3"
+
+
+def test_github_host_resolve_argument_beats_env(monkeypatch):
+    from secscan.config import GithubHost
+
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghes.example.com")
+    host = GithubHost.resolve("https://acme.ghe.com")
+    assert (host.api_url, host.web_url) == ("https://api.acme.ghe.com", "https://acme.ghe.com")
+
+
+def test_run_config_github_api_url_defaults_to_none():
+    assert RunConfig().github_api_url is None

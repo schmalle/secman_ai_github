@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import hashlib
+import io
 import json
 import re
 from enum import Enum
@@ -87,6 +88,21 @@ SUMMARY_FIELDS = [
     "cost_usd",
     "reviewed_at",
     "error",
+]
+
+# Column order for the org/repo usernames CSV (`secscan list-users`).
+USER_FIELDS = [
+    "source",
+    "org",
+    "repo",
+    "login",
+    "role",
+    "user_type",
+    "site_admin",
+    "user_id",
+    "name",
+    "email",
+    "html_url",
 ]
 
 _HIGH_CRITICAL = {Severity.CRITICAL, Severity.HIGH}
@@ -235,6 +251,36 @@ def write_summary_csv(path: Path, rows: Iterable[Any]) -> Path:
             d = _row_to_dict(row)
             writer.writerow({k: _csv_cell(_csv_value(d.get(k, ""))) for k in SUMMARY_FIELDS})
     return path
+
+
+def _write_users(fh, users: Iterable[Any]) -> None:
+    writer = csv.DictWriter(fh, fieldnames=USER_FIELDS, extrasaction="ignore")
+    writer.writeheader()
+    for row in users:
+        d = _row_to_dict(row)
+        # A GitHub display name is free text the account holder chooses, so it reaches
+        # the spreadsheet exactly as attacker-controlled as a finding does.
+        writer.writerow({k: _csv_cell(_csv_value(d.get(k, ""))) for k in USER_FIELDS})
+
+
+def write_users_csv(path: Path, users: Iterable[Any]) -> Path:
+    """Write org members / repo collaborators to CSV. Accepts dicts or GithubUser."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        _write_users(fh, users)
+    return path
+
+
+def render_users_csv(users: Iterable[Any]) -> str:
+    """The same rows as `write_users_csv`, as a string — for stdout or `--output`.
+
+    Line endings are `\\n`, not the `\\r\\n` the csv module writes to files: this text is
+    echoed to a terminal or piped, where stray carriage returns are noise.
+    """
+    buf = io.StringIO()
+    _write_users(buf, users)
+    return buf.getvalue().replace("\r\n", "\n")
 
 
 def _csv_value(v: Any) -> Any:

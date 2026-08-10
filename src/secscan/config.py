@@ -10,11 +10,83 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
+
+DEFAULT_API_URL = "https://api.github.com"
+DEFAULT_WEB_URL = "https://github.com"
+
+_ACCEPTED_URL_FORMS = (
+    "accepted forms: https://github.com (Enterprise Cloud), "
+    "https://TENANT.ghe.com or https://api.TENANT.ghe.com (Enterprise Cloud with data "
+    "residency), https://ghes.example.com or https://ghes.example.com/api/v3 "
+    "(Enterprise Server)"
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
     val = os.environ.get(name)
     return val if val not in (None, "") else default
+
+
+def normalize_github_urls(value: str | None) -> tuple[str, str]:
+    """Return (api_url, web_url) for a GitHub deployment. Empty input means public GitHub.
+
+    The three commercial deployments address their API differently, and getting this
+    wrong is a silent 404 rather than a clean error:
+
+    - Enterprise Cloud (github.com) and Enterprise Cloud with data residency
+      (`TENANT.ghe.com`) put the API on an `api.` **subdomain**.
+    - Enterprise Server puts it on an `/api/v3` **path** of the same host.
+
+    So the caller may paste either the web host or the API host and get the same result.
+    """
+    raw = (value or "").strip().rstrip("/")
+    if not raw:
+        return DEFAULT_API_URL, DEFAULT_WEB_URL
+
+    parts = urlsplit(raw)
+    if parts.scheme not in ("http", "https"):
+        raise ConfigError(
+            f"GitHub API URL must start with http:// or https:// (got {raw!r}); "
+            f"{_ACCEPTED_URL_FORMS}"
+        )
+    host = parts.netloc
+    if not host:
+        raise ConfigError(f"GitHub API URL has no host (got {raw!r}); {_ACCEPTED_URL_FORMS}")
+
+    origin = f"{parts.scheme}://{host}"
+    path = parts.path
+
+    # Enterprise Server, already pointing at the API root.
+    if path == "/api/v3":
+        return raw, origin
+    if path:
+        raise ConfigError(
+            f"unexpected path in GitHub API URL {raw!r} — pass the host, or the host "
+            f"plus /api/v3 for Enterprise Server; {_ACCEPTED_URL_FORMS}"
+        )
+
+    # Enterprise Cloud: github.com and data-residency tenants on *.ghe.com.
+    bare = host[len("api.") :] if host.startswith("api.") else host
+    if bare in ("github.com", "www.github.com") or bare.endswith(".ghe.com"):
+        bare = "github.com" if bare == "www.github.com" else bare
+        return f"{parts.scheme}://api.{bare}", f"{parts.scheme}://{bare}"
+
+    # Enterprise Server, given as the web host.
+    return f"{origin}/api/v3", origin
+
+
+@dataclass(frozen=True)
+class GithubHost:
+    """Which GitHub deployment to talk to. Defaults to the public/Enterprise Cloud host."""
+
+    api_url: str = DEFAULT_API_URL
+    web_url: str = DEFAULT_WEB_URL
+
+    @classmethod
+    def resolve(cls, api_url: str | None = None) -> "GithubHost":
+        """Build from an explicit override, else `GITHUB_API_URL`, else public GitHub."""
+        return cls(*normalize_github_urls(api_url or _env("GITHUB_API_URL")))
 
 
 @dataclass
@@ -23,9 +95,10 @@ class GithubAppConfig:
 
     app_id: str
     private_key: str
+    host: GithubHost = field(default_factory=GithubHost)
 
     @classmethod
-    def from_env(cls) -> "GithubAppConfig":
+    def from_env(cls, api_url: str | None = None) -> "GithubAppConfig":
         app_id = _env("GITHUB_APP_ID")
         if not app_id:
             raise ConfigError("GITHUB_APP_ID is required")
@@ -41,7 +114,7 @@ class GithubAppConfig:
             raise ConfigError(
                 "GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_PATH is required"
             )
-        return cls(app_id=app_id, private_key=key)
+        return cls(app_id=app_id, private_key=key, host=GithubHost.resolve(api_url))
 
 
 @dataclass
@@ -49,13 +122,14 @@ class GithubPatConfig:
     """GitHub personal access token (classic or fine-grained). Held in memory only."""
 
     token: str
+    host: GithubHost = field(default_factory=GithubHost)
 
     @classmethod
-    def from_env(cls) -> "GithubPatConfig":
+    def from_env(cls, api_url: str | None = None) -> "GithubPatConfig":
         token = _env("GITHUB_TOKEN")
         if not token:
             raise ConfigError("GITHUB_TOKEN is required for PAT auth")
-        return cls(token=token)
+        return cls(token=token, host=GithubHost.resolve(api_url))
 
 
 @dataclass
@@ -71,6 +145,8 @@ class RunConfig:
 
     output_dir: Path = Path("output")
     state_db: Path = Path("output/secscan.sqlite3")
+    # GitHub deployment to talk to; None = GITHUB_API_URL, else public/Enterprise Cloud.
+    github_api_url: str | None = None
     db_url: str | None = None  # mysql://… selects MySQL/MariaDB; None uses state_db (SQLite)
     db_user: str | None = None  # overrides any user embedded in db_url
     db_password: str | None = None  # overrides any password embedded in db_url

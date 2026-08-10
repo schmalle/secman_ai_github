@@ -279,3 +279,62 @@ def test_run_dry_run_via_env(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["cfg"].dry_run is True
     assert captured["armed"] is True
+
+
+# -- GitHub deployment ------------------------------------------------------------
+
+
+def test_scan_github_api_url_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(
+        app,
+        ["scan", "octo/demo", "--output-dir", str(tmp_path),
+         "--github-api-url", "https://ghes.example.com"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["cfg"].github_api_url == "https://ghes.example.com"
+
+
+def test_run_github_api_url_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_run_scan(cfg, org=None, repos_file=None, targets_only=False):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(
+        app,
+        ["run", "--output-dir", str(tmp_path), "--targets-only",
+         "--github-api-url", "https://acme.ghe.com"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["cfg"].github_api_url == "https://acme.ghe.com"
+
+
+def test_scan_github_api_url_defaults_to_none(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["cfg"].github_api_url is None

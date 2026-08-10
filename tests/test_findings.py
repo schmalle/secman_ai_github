@@ -1,5 +1,7 @@
 import csv
 
+import pytest
+
 from secscan.findings import (
     Finding,
     Severity,
@@ -218,3 +220,66 @@ def test_fingerprint_differs_on_file_path():
     a = Finding(severity="high", title="SQLi", description="d", file_path="x.py")
     b = Finding(severity="high", title="SQLi", description="d", file_path="y.py")
     assert fingerprint(a) != fingerprint(b)
+
+
+# -- users CSV --------------------------------------------------------------------
+
+
+def _user(login="octocat", **kw):
+    from secscan.github_users import GithubUser
+
+    defaults = dict(
+        user_id=1, name="The Octocat", email="", user_type="User", site_admin=False,
+        source="org", org="acme", repo="", role="member", html_url="",
+    )
+    defaults.update(kw)
+    return GithubUser(login=login, **defaults)
+
+
+def test_write_users_csv_header_and_row_order(tmp_path):
+    from secscan.findings import USER_FIELDS, write_users_csv
+
+    path = write_users_csv(
+        tmp_path / "users.csv",
+        [_user("alice", role="admin"), _user("bob", source="repo", repo="webapp", role="write")],
+    )
+
+    rows = list(csv.DictReader(path.read_text().splitlines()))
+    assert list(rows[0].keys()) == USER_FIELDS
+    assert [(r["login"], r["role"], r["org"], r["repo"]) for r in rows] == [
+        ("alice", "admin", "acme", ""),
+        ("bob", "write", "acme", "webapp"),
+    ]
+
+
+def test_write_users_csv_accepts_dicts(tmp_path):
+    from secscan.findings import write_users_csv
+
+    path = write_users_csv(tmp_path / "users.csv", [{"login": "alice", "org": "acme"}])
+    rows = list(csv.DictReader(path.read_text().splitlines()))
+    assert rows[0]["login"] == "alice"
+    assert rows[0]["role"] == ""
+
+
+@pytest.mark.parametrize("hostile", ["=cmd|' /c calc'!A0", "+1+1", "-2+3", "@SUM(A1)"])
+def test_write_users_csv_neutralizes_formula_injection(tmp_path, hostile):
+    """A GitHub display name is free text its owner chooses — treat it like any finding."""
+    from secscan.findings import write_users_csv
+
+    path = write_users_csv(tmp_path / "users.csv", [_user(login=hostile, name=hostile)])
+
+    row = next(csv.DictReader(path.read_text().splitlines()))
+    assert row["login"] == "'" + hostile
+    assert row["name"] == "'" + hostile
+
+
+def test_render_users_csv_matches_the_file_and_uses_plain_newlines(tmp_path):
+    from secscan.findings import render_users_csv, write_users_csv
+
+    users = [_user("alice", name="=danger")]
+    path = write_users_csv(tmp_path / "users.csv", users)
+
+    rendered = render_users_csv(users)
+    assert "\r" not in rendered  # echoed to a terminal, not written as RFC 4180
+    assert rendered == path.read_text()  # read_text() normalizes the file's \r\n
+    assert "'=danger" in rendered  # the injection guard applies to both paths

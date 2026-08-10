@@ -14,6 +14,12 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from .config import Filters, GithubAppConfig
+from .github_users import (
+    GithubUser,
+    OrgAccessError,
+    iter_org_members,
+    iter_repo_collaborators,
+)
 
 
 @dataclass
@@ -90,7 +96,7 @@ class GithubAppClient:
             from github import Auth, GithubIntegration
 
             auth = Auth.AppAuth(self._config.app_id, self._config.private_key)
-            self._integration = GithubIntegration(auth=auth)
+            self._integration = GithubIntegration(auth=auth, base_url=self._config.host.api_url)
         return self._integration
 
     def installation_token(self, installation_id: int) -> str:
@@ -119,3 +125,28 @@ class GithubAppClient:
         for repo in self._iter_raw_repos():
             if should_include(repo, filters, org):
                 yield repo
+
+    def github_for_account(self, login: str):
+        """A client scoped to the installation `login` owns.
+
+        The App's own JWT cannot read org members; only an installation token can, so
+        the right installation has to be found before any user listing.
+        """
+        for installation in self.integration.get_installations():
+            account = getattr(installation, "account", None)
+            if account is not None and str(account.login).lower() == login.lower():
+                return self.integration.get_github_for_installation(installation.id)
+        raise OrgAccessError(
+            f"the GitHub App has no installation on {login!r}, so it cannot list its "
+            "users. Install the App on that organization (with the Organization "
+            "permission 'Members: Read'), or use a PAT."
+        )
+
+    def iter_org_members(self, org: str) -> Iterator[GithubUser]:
+        """Members of `org` with their role (same interface as GithubPatClient)."""
+        return iter_org_members(self.github_for_account(org), org)
+
+    def iter_repo_collaborators(self, full_name: str) -> Iterator[GithubUser]:
+        """Collaborators on `owner/name` (same interface as GithubPatClient)."""
+        owner = full_name.partition("/")[0]
+        return iter_repo_collaborators(self.github_for_account(owner), full_name)

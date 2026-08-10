@@ -4,6 +4,7 @@ Commands:
   run         enumerate + clone + review reachable repos, write CSVs
   scan        clone + review a single remote repo by 'owner/name'
   list-repos  enumerate + filter only (no review) — show what would be scanned
+  list-users  list an org's members and its repos' collaborators (org-only GitHub APIs)
   review      review a single local repo directory (dev/test loop, no GitHub)
   report      rebuild the aggregate summary.csv from the state DB
   stats       print scan statistics from the state DB (table / csv / json)
@@ -14,6 +15,10 @@ Commands:
 `--dry-run` (on run / scan / push-to-secman, or SECSCAN_DRY_RUN=1 for all three)
 means no external writes: no GitHub issue is opened and nothing reaches secman.
 It also arms the guard in dryrun.py — see that module and CLAUDE.md.
+
+`--github-api-url` (on run / scan / list-repos / list-users, or GITHUB_API_URL for
+all four) selects the GitHub deployment: github.com / Enterprise Cloud by default,
+Enterprise Cloud with data residency, or Enterprise Server.
 """
 
 from __future__ import annotations
@@ -109,6 +114,14 @@ _DRY_RUN_HELP = (
 )
 
 
+_GITHUB_API_URL_HELP = (
+    "GitHub deployment to talk to (or GITHUB_API_URL env). Omit for github.com / "
+    "Enterprise Cloud. Enterprise Cloud with data residency: https://TENANT.ghe.com. "
+    "Enterprise Server: https://ghes.example.com (the /api/v3 suffix is added for you, "
+    "and accepted if you pass it)."
+)
+
+
 def _enter_dry_run(flag: bool) -> bool:
     """Resolve --dry-run (flag or SECSCAN_DRY_RUN) and arm the guard if it's on.
 
@@ -179,6 +192,7 @@ def _run_config(
     smtp_host: str | None = None,
     smtp_port: int | None = None,
     email_subject: str | None = None,
+    github_api_url: str | None = None,
 ) -> RunConfig:
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
@@ -206,6 +220,7 @@ def _run_config(
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
+        github_api_url=github_api_url,
         db_url=db_url,
         db_user=db_user,
         db_password=db_password,
@@ -263,6 +278,7 @@ def run(
         ),
     ),
     output_dir: Path = typer.Option(Path("output"), help="Where CSVs and state live."),
+    github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (mysql://user:pass@host:3306/db). Defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
@@ -328,6 +344,7 @@ def run(
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
+            github_api_url=github_api_url,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:
@@ -348,6 +365,7 @@ def list_repos(
              "it costs one extra API call per repo, so --no-last-commit is the fast path.",
     ),
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
+    github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
@@ -359,7 +377,11 @@ def list_repos(
     from .state import StateStore
 
     filters = Filters(include_archived=include_archived, include_forks=include_forks, max_size_mb=max_size_mb)
-    auth = build_auth()
+    try:
+        auth = build_auth(github_api_url)
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
     # Without --last-commit there is nothing new to record, so no store is opened.
     store = None if no_db or not last_commit else StateStore(
         _resolve_db_url(db_url) or (output_dir / "secscan.sqlite3"),
@@ -386,6 +408,167 @@ def list_repos(
     finally:
         if store is not None:
             store.close()
+
+
+_LIST_USERS_ORG_HELP = (
+    "Organization login whose members to list, with each member's role (admin/member). "
+    "GitHub exposes members only for organizations — a personal account has none."
+)
+_LIST_USERS_REPO_HELP = (
+    "Repository as 'owner/name' whose collaborators to list, with each collaborator's "
+    "permission level. Repeat for multiple repositories."
+)
+
+
+def _user_rows(
+    auth, org: str | None, repos: list[str], org_repos: bool, filters: Filters
+) -> list:
+    """Collect users across every requested scope, deduped, App first then PAT.
+
+    Returns a flat list of GithubUser. Scopes are kept in insertion order so the table,
+    the CSV and the DB all see the same sequence.
+    """
+    from .github_users import OrgAccessError
+
+    clients = [c for c in (auth.app, auth.pat) if c is not None]
+    scopes: list[tuple[str, str]] = []  # (org, repo); repo == "" means org members
+    if org:
+        scopes.append((org, ""))
+    for full_name in repos:
+        owner, name = _split_full_name(full_name)
+        scopes.append((owner, name))
+    if org_repos:
+        for client in clients:
+            for repo in client.iter_repositories(org=org, filters=filters):
+                if (repo.owner, repo.name) not in scopes:
+                    scopes.append((repo.owner, repo.name))
+
+    collected: list = []
+    seen: set[tuple[str, str, str]] = set()
+    for scope_org, scope_repo in scopes:
+        errors: list[OrgAccessError] = []
+        for client in clients:
+            try:
+                if scope_repo:
+                    users = list(
+                        client.iter_repo_collaborators(f"{scope_org}/{scope_repo}")
+                    )
+                else:
+                    users = list(client.iter_org_members(scope_org))
+            except OrgAccessError as exc:
+                errors.append(exc)  # the other credential may still be able to see it
+                continue
+            for user in users:
+                key = (user.org, user.repo, user.login)
+                if key in seen:
+                    continue  # App entry wins; PAT duplicates are dropped
+                seen.add(key)
+                collected.append(user)
+            break
+        else:
+            if errors:
+                raise errors[0]
+    return collected
+
+
+@app.command("list-users")
+def list_users(
+    org: str = typer.Option(None, "--org", help=_LIST_USERS_ORG_HELP),
+    repo: list[str] = typer.Option(None, "--repo", help=_LIST_USERS_REPO_HELP),
+    org_repos: bool = typer.Option(
+        False, "--org-repos",
+        help="With --org, also list the collaborators of every repository in that org.",
+    ),
+    github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
+    format: str = typer.Option("table", "--format", help="table|csv|json."),
+    output: Path = typer.Option(None, "--output", help="Write csv/json to this file instead of stdout."),
+    no_csv: bool = typer.Option(False, "--no-csv", help="Do not write <output-dir>/users.csv."),
+    include_archived: bool = typer.Option(False, help="With --org-repos, include archived repos."),
+    include_forks: bool = typer.Option(False, help="With --org-repos, include forked repos."),
+    output_dir: Path = typer.Option(Path("output"), help="Where users.csv and the state DB live."),
+    db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
+    db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
+    db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+    no_db: bool = typer.Option(False, "--no-db", help="Print only; do not record the users in the state DB."),
+) -> None:
+    """List the usernames in an organization and on its repositories.
+
+    Org members and repo collaborators are organization-only GitHub APIs; they work the
+    same on github.com / Enterprise Cloud, Enterprise Cloud with data residency, and
+    Enterprise Server (see --github-api-url). Read-only: nothing is written to GitHub.
+    """
+    import dataclasses
+    import json
+    from datetime import datetime, timezone
+
+    from .findings import render_users_csv, write_users_csv
+    from .github_auth import build_auth
+    from .github_users import OrgAccessError
+
+    if format not in ("table", "csv", "json"):
+        raise typer.BadParameter(f"--format must be table, csv, or json (got {format!r})")
+    repos = list(repo or [])
+    if not org and not repos:
+        raise typer.BadParameter("pass --org and/or --repo (repeatable) to say whose users to list")
+    if org_repos and not org:
+        raise typer.BadParameter("--org-repos needs --org to say which organization's repos to walk")
+
+    filters = Filters(
+        include_archived=include_archived, include_forks=include_forks, max_size_mb=0
+    )
+    try:
+        auth = build_auth(github_api_url)
+        users = _user_rows(auth, org, repos, org_repos, filters)
+    except (ConfigError, OrgAccessError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+    if not no_db:
+        store = _open_store(output_dir, db_url, db_user, db_password, db_ssl)
+        seen_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            # One replace per scope, so a scope with no users left still empties.
+            scopes = {(u.org, u.repo) for u in users}
+            for scope_org, scope_repo in sorted(scopes):
+                store.replace_users(
+                    scope_org,
+                    scope_repo,
+                    [u for u in users if (u.org, u.repo) == (scope_org, scope_repo)],
+                    seen_at=seen_at,
+                )
+        finally:
+            store.close()
+
+    if not no_csv:
+        csv_path = write_users_csv(output_dir / "users.csv", users)
+        typer.echo(f"Wrote {csv_path} ({len(users)} users)", err=True)
+
+    if format == "table":
+        for user in users:
+            typer.echo(
+                "\t".join(
+                    (
+                        user.source, user.scope, user.login, user.role or "-",
+                        user.user_type or "-", user.name or "-",
+                    )
+                )
+            )
+        if not users:
+            typer.echo("(no users found)")
+        return
+
+    if format == "json":
+        rendered = json.dumps([dataclasses.asdict(u) for u in users], indent=2)
+    else:
+        rendered = render_users_csv(users)
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered if rendered.endswith("\n") else rendered + "\n")
+        typer.echo(f"Wrote {output}")
+    else:
+        typer.echo(rendered)
 
 
 @app.command()
@@ -432,6 +615,7 @@ def review(
 def scan(
     full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV and state live."),
+    github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
     db_password: str = typer.Option(None, help="MySQL/MariaDB password (or DB_PASSWORD env). Overrides any password embedded in --db-url."),
@@ -488,6 +672,7 @@ def scan(
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
+            github_api_url=github_api_url,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:

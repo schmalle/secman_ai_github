@@ -228,3 +228,105 @@ def test_resolve_target_uses_pat_lookup():
 def test_resolve_target_falls_back_when_lookup_fails():
     info = resolve_target("octo", "repo", AuthContext(app=None, pat=_FakePat()))
     assert info.clone_url == "https://github.com/octo/repo.git"
+
+
+# -- GitHub deployment (Enterprise Cloud / Enterprise Server) ----------------------
+
+
+@pytest.mark.parametrize(
+    "api_url,expected_base",
+    [
+        (None, "https://api.github.com"),                              # Enterprise Cloud
+        ("https://github.com", "https://api.github.com"),              # Enterprise Cloud
+        ("https://acme.ghe.com", "https://api.acme.ghe.com"),          # GHEC data residency
+        ("https://ghes.example.com", "https://ghes.example.com/api/v3"),  # Enterprise Server
+    ],
+)
+def test_pat_client_points_pygithub_at_the_configured_deployment(api_url, expected_base):
+    """PyGithub's constructor makes no request, so the base URL can be asserted directly."""
+    from secscan.config import GithubHost
+
+    client = GithubPatClient(GithubPatConfig(token="ghp_abc", host=GithubHost.resolve(api_url)))
+    assert client.gh.requester.base_url == expected_base
+
+
+def test_build_auth_applies_the_api_url_to_every_client_and_the_context(monkeypatch):
+    _clear_github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_ID", "123")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "fake-pem")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_abc")
+
+    auth = build_auth("https://ghes.example.com")
+
+    assert auth.host.api_url == "https://ghes.example.com/api/v3"
+    assert auth.host.web_url == "https://ghes.example.com"
+    assert auth.app._config.host == auth.host
+    assert auth.pat._config.host == auth.host
+
+
+def test_build_auth_reads_github_api_url_from_the_environment(monkeypatch):
+    _clear_github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_abc")
+    monkeypatch.setenv("GITHUB_API_URL", "https://acme.ghe.com")
+
+    auth = build_auth()
+
+    assert auth.host.api_url == "https://api.acme.ghe.com"
+
+
+def test_build_auth_argument_beats_the_environment(monkeypatch):
+    _clear_github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_abc")
+    monkeypatch.setenv("GITHUB_API_URL", "https://acme.ghe.com")
+
+    auth = build_auth("https://ghes.example.com")
+
+    assert auth.host.api_url == "https://ghes.example.com/api/v3"
+
+
+def test_resolve_target_fallback_uses_the_enterprise_web_host():
+    """Enterprise Server serves git from its own host, not github.com."""
+    from secscan.config import GithubHost
+
+    auth = AuthContext(app=None, pat=None, host=GithubHost.resolve("https://ghes.example.com"))
+    info = resolve_target("acme", "webapp", auth)
+    assert info.clone_url == "https://ghes.example.com/acme/webapp.git"
+
+
+def test_resolve_target_fallback_defaults_to_github_com():
+    assert resolve_target("octo", "repo", AuthContext()).clone_url == (
+        "https://github.com/octo/repo.git"
+    )
+
+
+# -- user listings ----------------------------------------------------------------
+
+
+def test_pat_client_iter_org_members_delegates_to_the_token_client():
+    from types import SimpleNamespace as NS
+
+    members = [NS(login="alice", id=1, name=None, email=None, type="User", site_admin=False, html_url="")]
+    fake_gh = NS(
+        get_organization=lambda org: NS(
+            get_members=lambda role=None: (members if role != "admin" else [])
+        )
+    )
+    client = _pat_client_with_fake_gh(fake_gh)
+    assert [(u.login, u.role, u.org) for u in client.iter_org_members("acme")] == [
+        ("alice", "member", "acme")
+    ]
+
+
+def test_pat_client_iter_repo_collaborators_delegates_to_the_token_client():
+    from types import SimpleNamespace as NS
+
+    collaborators = [
+        NS(login="bob", id=2, name=None, email=None, type="User", site_admin=False,
+           html_url="", role_name="write")
+    ]
+    fake_gh = NS(
+        get_repo=lambda full_name: NS(get_collaborators=lambda affiliation=None: collaborators)
+    )
+    client = _pat_client_with_fake_gh(fake_gh)
+    users = list(client.iter_repo_collaborators("acme/webapp"))
+    assert [(u.login, u.role, u.org, u.repo) for u in users] == [("bob", "write", "acme", "webapp")]

@@ -39,7 +39,7 @@ class _FakeClient:
 def _patch_auth(monkeypatch, client):
     import secscan.github_auth as github_auth
 
-    monkeypatch.setattr(github_auth, "build_auth", lambda: SimpleNamespace(app=None, pat=client))
+    monkeypatch.setattr(github_auth, "build_auth", lambda api_url=None: SimpleNamespace(app=None, pat=client))
 
 
 def test_list_repos_appends_short_sha_and_date_by_default(monkeypatch):
@@ -108,3 +108,31 @@ def test_list_repos_no_last_commit_writes_nothing(monkeypatch, tmp_path):
     )
     assert result.exit_code == 0
     assert not (tmp_path / "secscan.sqlite3").exists()  # nothing to record
+
+
+def test_list_repos_forwards_github_api_url_to_build_auth(monkeypatch):
+    import secscan.github_auth as github_auth
+
+    seen = {}
+    client = _FakeClient([_repo()], {})
+
+    def _build_auth(api_url=None):
+        seen["api_url"] = api_url
+        return SimpleNamespace(app=None, pat=client)
+
+    monkeypatch.setattr(github_auth, "build_auth", _build_auth)
+
+    result = runner.invoke(
+        app, ["list-repos", "--no-db", "--github-api-url", "https://ghes.example.com"]
+    )
+
+    assert result.exit_code == 0
+    assert seen["api_url"] == "https://ghes.example.com"
+
+
+def test_list_repos_reports_a_bad_github_api_url(monkeypatch):
+    """A malformed deployment URL must be a clean message, not a traceback."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_abc")
+    result = runner.invoke(app, ["list-repos", "--no-db", "--github-api-url", "ftp://nope"])
+    assert result.exit_code == 1
+    assert "http://" in result.output
