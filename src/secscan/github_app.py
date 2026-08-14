@@ -62,11 +62,6 @@ def should_include(repo: RepoInfo, filters: Filters, org: str | None) -> bool:
     return True
 
 
-def authed_clone_url(clone_url: str, token: str) -> str:
-    """Insert an installation token into an https clone URL for git authentication."""
-    return clone_url.replace("https://", f"https://x-access-token:{token}@", 1)
-
-
 def redact_url(url: str) -> str:
     """Strip any embedded credentials so a URL is safe to log."""
     return re.sub(r"https://[^@/]+@", "https://***@", url)
@@ -126,21 +121,47 @@ class GithubAppClient:
             if should_include(repo, filters, org):
                 yield repo
 
+    def installation_for_account(self, login: str):
+        """The installation `login` owns, or None if the App is not installed there."""
+        for installation in self.integration.get_installations():
+            account = getattr(installation, "account", None)
+            if account is not None and str(account.login).lower() == login.lower():
+                return installation
+        return None
+
+    def lookup_repo(self, owner: str, name: str) -> RepoInfo | None:
+        """Fetch one repo's metadata via the installation `owner` owns, or None.
+
+        Reaches repos `iter_repositories` did not enumerate (an explicitly added
+        target). The RepoInfo carries a real `installation_id`, which is what lets
+        `AuthContext.token_for` mint a clone token for it later.
+        """
+        from github import GithubException
+
+        installation = self.installation_for_account(owner)
+        if installation is None:
+            return None
+        gh = self.integration.get_github_for_installation(installation.id)
+        try:
+            repo = gh.get_repo(f"{owner}/{name}")
+        except GithubException:
+            return None
+        return RepoInfo.from_github_repo(repo, installation.id)
+
     def github_for_account(self, login: str):
         """A client scoped to the installation `login` owns.
 
         The App's own JWT cannot read org members; only an installation token can, so
         the right installation has to be found before any user listing.
         """
-        for installation in self.integration.get_installations():
-            account = getattr(installation, "account", None)
-            if account is not None and str(account.login).lower() == login.lower():
-                return self.integration.get_github_for_installation(installation.id)
-        raise OrgAccessError(
-            f"the GitHub App has no installation on {login!r}, so it cannot list its "
-            "users. Install the App on that organization (with the Organization "
-            "permission 'Members: Read'), or use a PAT."
-        )
+        installation = self.installation_for_account(login)
+        if installation is None:
+            raise OrgAccessError(
+                f"the GitHub App has no installation on {login!r}, so it cannot list its "
+                "users. Install the App on that organization (with the Organization "
+                "permission 'Members: Read'), or use a PAT."
+            )
+        return self.integration.get_github_for_installation(installation.id)
 
     def iter_org_members(self, org: str) -> Iterator[GithubUser]:
         """Members of `org` with their role (same interface as GithubPatClient)."""

@@ -36,7 +36,6 @@ def _truncate(text: str, limit: int) -> str:
 @dataclass
 class IssueOutcome:
     action: str  # "created" | "skipped" | "would_create"
-    finding_title: str
     issue_url: str = ""
 
 
@@ -78,14 +77,14 @@ def process_finding(
         if not dry_run:
             dryrun.guard(f"record a new sighting of {owner}/{repo} issue #{existing.issue_number}")
             store.touch_issue_seen(owner, repo, fp, seen_at)
-        return IssueOutcome(action="skipped", finding_title=finding.title, issue_url=existing.issue_url)
+        return IssueOutcome(action="skipped", issue_url=existing.issue_url)
 
     if dry_run:
-        return IssueOutcome(action="would_create", finding_title=finding.title)
+        return IssueOutcome(action="would_create")
 
     dryrun.guard(f"open a GitHub issue on {owner}/{repo}")
     issue = gh_repo.create_issue(
         title=_issue_title(finding, prefix), body=_issue_body(finding, fp), labels=["secscan"]
     )
     store.record_issue_created(owner, repo, fp, issue.number, issue.html_url, seen_at)
-    return IssueOutcome(action="created", finding_title=finding.title, issue_url=issue.html_url)
+    return IssueOutcome(action="created", issue_url=issue.html_url)

@@ -1,15 +1,17 @@
 """GitHub authentication front-door: App and/or personal access token (PAT).
 
-Two credential sources can coexist:
+The GitHub App is the primary credential; the PAT is an optional fallback. Either
+can stand alone, and both can be configured at once:
 
-- GitHub App (`GITHUB_APP_ID` + private key): enumerates every reachable repo and
-  mints short-lived installation tokens for cloning (see `github_app.py`).
-- PAT (`GITHUB_TOKEN`): authenticates as a user/bot. Used to clone explicitly-added
-  targets the App cannot reach, and to enumerate token-accessible repos.
+- GitHub App (`GITHUB_APP_ID` or `GITHUB_APP_CLIENT_ID`, plus the private key):
+  enumerates every reachable repo, resolves explicitly-added targets, and mints
+  short-lived installation tokens for cloning (see `github_app.py`).
+- PAT (`GITHUB_TOKEN`): authenticates as a user/bot. Reaches repos the App is not
+  installed on, and enumerates token-accessible repos.
 
-`AuthContext` picks the right credential per repo: repos discovered through an App
-installation carry its `installation_id`; explicit targets use `installation_id=0`
-as the "clone with the PAT" sentinel.
+`AuthContext` picks the right credential per repo: a repo resolved through an App
+installation carries its `installation_id`; `installation_id=0` means no installation
+covers it, so it is cloned with the PAT.
 """
 
 from __future__ import annotations
@@ -95,7 +97,10 @@ class AuthContext:
             return self.app.token_for(repo)
         if self.pat:
             return self.pat.token_for(repo)
-        raise ConfigError(f"no credentials can clone {repo.full_name}")
+        raise ConfigError(
+            f"no credentials can clone {repo.full_name} — install the GitHub App on "
+            f"{repo.owner!r}, or set GITHUB_TOKEN"
+        )
 
 
 def build_auth(api_url: str | None = None) -> AuthContext:
@@ -106,17 +111,27 @@ def build_auth(api_url: str | None = None) -> AuthContext:
     beats the public/Enterprise Cloud default. See `config.normalize_github_urls`.
     """
     host = GithubHost.resolve(api_url)
-    app = GithubAppClient(GithubAppConfig.from_env(api_url)) if _env("GITHUB_APP_ID") else None
+    app_configured = _env("GITHUB_APP_ID") or _env("GITHUB_APP_CLIENT_ID")
+    app = GithubAppClient(GithubAppConfig.from_env(api_url)) if app_configured else None
     pat = GithubPatClient(GithubPatConfig.from_env(api_url)) if _env("GITHUB_TOKEN") else None
     if app is None and pat is None:
         raise ConfigError(
-            "GitHub credentials required: set GITHUB_APP_ID (+ private key) or GITHUB_TOKEN"
+            "GitHub credentials required: set GITHUB_APP_ID (or GITHUB_APP_CLIENT_ID) "
+            "plus GITHUB_APP_PRIVATE_KEY/GITHUB_APP_PRIVATE_KEY_PATH, or GITHUB_TOKEN"
         )
     return AuthContext(app=app, pat=pat, host=host)
 
 
 def resolve_target(owner: str, name: str, auth: AuthContext) -> RepoInfo:
-    """Best-effort RepoInfo for an explicit target not covered by App enumeration."""
+    """Best-effort RepoInfo for an explicit target not covered by App enumeration.
+
+    The App is tried first: it is the primary credential, and only it can attach the
+    `installation_id` the repo needs to be cloneable without a PAT.
+    """
+    if auth.app:
+        info = auth.app.lookup_repo(owner, name)
+        if info:
+            return info
     if auth.pat:
         info = auth.pat.lookup_repo(owner, name)
         if info:

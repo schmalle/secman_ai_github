@@ -56,7 +56,13 @@ def test_pat_config_missing_raises(monkeypatch):
 
 
 def _clear_github_env(monkeypatch):
-    for var in ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_TOKEN"):
+    for var in (
+        "GITHUB_APP_ID",
+        "GITHUB_APP_CLIENT_ID",
+        "GITHUB_APP_PRIVATE_KEY",
+        "GITHUB_APP_PRIVATE_KEY_PATH",
+        "GITHUB_TOKEN",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -87,9 +93,19 @@ def test_build_auth_both(monkeypatch):
     assert auth.pat is not None
 
 
+def test_build_auth_app_from_client_id_only(monkeypatch):
+    _clear_github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv23liV27z2aVR0QLrBp")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "fake-pem")
+    auth = build_auth()
+    assert auth.app is not None
+    assert auth.app._config.app_id == "Iv23liV27z2aVR0QLrBp"
+    assert auth.pat is None
+
+
 def test_build_auth_neither_raises(monkeypatch):
     _clear_github_env(monkeypatch)
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError, match="GITHUB_APP_ID"):
         build_auth()
 
 
@@ -97,12 +113,19 @@ def test_build_auth_neither_raises(monkeypatch):
 
 
 class _FakeApp:
-    def __init__(self):
+    def __init__(self, installed=None):
         self.calls = []
+        self.installed = installed or {}  # owner -> installation_id
 
     def token_for(self, repo):
         self.calls.append(repo.full_name)
         return "ghs_installation"
+
+    def lookup_repo(self, owner, name):
+        installation_id = self.installed.get(owner)
+        if installation_id is None:
+            return None
+        return _repo(owner=owner, name=name, installation_id=installation_id)
 
 
 class _FakePat:
@@ -228,6 +251,46 @@ def test_resolve_target_uses_pat_lookup():
 def test_resolve_target_falls_back_when_lookup_fails():
     info = resolve_target("octo", "repo", AuthContext(app=None, pat=_FakePat()))
     assert info.clone_url == "https://github.com/octo/repo.git"
+
+
+def test_resolve_target_app_only_yields_a_cloneable_repo():
+    """Regression: App-only credentials could not clone an explicitly added target.
+
+    `resolve_target` used to consult the PAT alone, so with App-only credentials it
+    returned installation_id=0 and `token_for` then refused to mint any token.
+    """
+    app = _FakeApp(installed={"acme": 7})
+    auth = AuthContext(app=app, pat=None)
+
+    info = resolve_target("acme", "webapp", auth)
+
+    assert info.installation_id == 7
+    assert auth.token_for(info) == "ghs_installation"
+
+
+def test_resolve_target_prefers_the_app_over_the_pat():
+    class _Pat(_FakePat):
+        def lookup_repo(self, owner, name):
+            return _repo(owner=owner, name=name, size_kb=777)
+
+    info = resolve_target("acme", "webapp", AuthContext(app=_FakeApp({"acme": 7}), pat=_Pat()))
+    assert info.installation_id == 7
+
+
+def test_resolve_target_uses_the_pat_where_the_app_is_not_installed():
+    class _Pat(_FakePat):
+        def lookup_repo(self, owner, name):
+            return _repo(owner=owner, name=name, size_kb=777)
+
+    info = resolve_target("octo", "repo", AuthContext(app=_FakeApp({"acme": 7}), pat=_Pat()))
+    assert (info.installation_id, info.size_kb) == (0, 777)
+
+
+def test_token_for_error_names_both_ways_to_fix_it():
+    auth = AuthContext(app=None, pat=None)
+    with pytest.raises(ConfigError, match="GITHUB_TOKEN") as exc:
+        auth.token_for(_repo(owner="acme", name="webapp"))
+    assert "acme" in str(exc.value)
 
 
 # -- GitHub deployment (Enterprise Cloud / Enterprise Server) ----------------------

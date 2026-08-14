@@ -89,19 +89,39 @@ class GithubHost:
         return cls(*normalize_github_urls(api_url or _env("GITHUB_API_URL")))
 
 
+MISSING_APP_ISSUER = (
+    "GITHUB_APP_ID or GITHUB_APP_CLIENT_ID is required — both are shown on the App's "
+    "page under Settings > Developer settings > GitHub Apps."
+)
+
+# A GitHub App authenticates by signing its own JWT, so the private key is the one
+# credential it cannot work without. The Client Secret sits next to it in the UI and
+# belongs to a different (OAuth user-login) flow entirely, which makes it the natural
+# thing to reach for by mistake.
+MISSING_PRIVATE_KEY = (
+    "GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_PATH is required. A GitHub App "
+    "signs its own JWT, so it needs the private key (.pem) — a client secret cannot "
+    "stand in for it. Create one under Settings > Developer settings > GitHub Apps > "
+    "<your app> > Private keys > Generate a private key."
+)
+
+
 @dataclass
 class GithubAppConfig:
     """GitHub App credentials. The private key is held in memory only."""
 
+    # JWT issuer: the numeric App ID, or equivalently the App's Client ID.
     app_id: str
     private_key: str
     host: GithubHost = field(default_factory=GithubHost)
 
     @classmethod
     def from_env(cls, api_url: str | None = None) -> "GithubAppConfig":
-        app_id = _env("GITHUB_APP_ID")
+        # GitHub accepts the App's Client ID as the JWT issuer wherever it accepts the
+        # numeric App ID; the App ID wins when both are set.
+        app_id = _env("GITHUB_APP_ID") or _env("GITHUB_APP_CLIENT_ID")
         if not app_id:
-            raise ConfigError("GITHUB_APP_ID is required")
+            raise ConfigError(MISSING_APP_ISSUER)
 
         key = _env("GITHUB_APP_PRIVATE_KEY")
         key_path = _env("GITHUB_APP_PRIVATE_KEY_PATH")
@@ -111,9 +131,7 @@ class GithubAppConfig:
             except OSError as exc:
                 raise ConfigError(f"cannot read GITHUB_APP_PRIVATE_KEY_PATH: {exc}") from exc
         if not key:
-            raise ConfigError(
-                "GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_PATH is required"
-            )
+            raise ConfigError(MISSING_PRIVATE_KEY)
         return cls(app_id=app_id, private_key=key, host=GithubHost.resolve(api_url))
 
 

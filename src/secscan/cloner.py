@@ -17,7 +17,6 @@ import asyncio
 import base64
 import os
 import shutil
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .github_app import RepoInfo, redact_url
@@ -119,15 +118,3 @@ def cleanup(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-@asynccontextmanager
-async def cloned_repo(
-    repo: RepoInfo, token: str, dest_root: Path, keep: bool = False,
-    branch: str | None = None,
-):
-    """Clone for the duration of the context; remove afterwards unless `keep`."""
-    dest = await clone_repo(repo, token, dest_root, branch)
-    try:
-        yield dest
-    finally:
-        if not keep:
-            cleanup(dest)

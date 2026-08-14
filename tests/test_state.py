@@ -2,7 +2,7 @@ import sqlite3
 
 from secscan.findings import Finding
 from secscan.state import (
-    IssueRecord, RepoRecord, StateStore, Status, _dialect_for, _mysql_connect_kwargs,
+    RepoRecord, StateStore, Status, _dialect_for, _mysql_connect_kwargs,
     _MYSQL_DIALECT, _SQLITE_DIALECT,
 )
 

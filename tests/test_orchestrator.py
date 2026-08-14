@@ -70,6 +70,9 @@ class _FakeApp:
         self.iter_called = True
         return iter([])
 
+    def lookup_repo(self, owner, name):
+        return None  # no installation covers it; resolve_target falls through
+
 
 class _FakeAuth:
     def __init__(self, app=None, pat=None, host=None):
@@ -134,7 +137,7 @@ async def test_process_repo_forwards_timeout_to_review(tmp_path, monkeypatch):
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
         captured["idle_timeout_s"] = idle_timeout_s
-        return ReviewResult(repo_full_name=full_name)
+        return ReviewResult()
 
     monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
     monkeypatch.setattr(orch, "_clone", fake_clone)
@@ -164,7 +167,7 @@ async def test_process_repo_forwards_branch_to_clone(tmp_path, monkeypatch):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, **kwargs):
-        return ReviewResult(repo_full_name=full_name)
+        return ReviewResult()
 
     monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
     monkeypatch.setattr(orch, "_clone", fake_clone)
@@ -194,7 +197,7 @@ async def test_process_repo_clone_defaults_to_no_branch(tmp_path, monkeypatch):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, **kwargs):
-        return ReviewResult(repo_full_name=full_name)
+        return ReviewResult()
 
     monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
     monkeypatch.setattr(orch, "_clone", fake_clone)
@@ -249,7 +252,7 @@ async def test_process_repo_skips_store_when_no_db(tmp_path, monkeypatch):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
-        return ReviewResult(repo_full_name=full_name)
+        return ReviewResult()
 
     monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
     monkeypatch.setattr(orch, "_clone", fake_clone)
@@ -277,7 +280,7 @@ async def _patch_clone_and_review(monkeypatch, tmp_path):
         return tmp_path / "clone"
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
-        return ReviewResult(repo_full_name=full_name)
+        return ReviewResult()
 
     monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
     monkeypatch.setattr(orch, "_clone", fake_clone)
@@ -364,7 +367,7 @@ async def test_process_repo_creates_issues_when_enabled(
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
-        return ReviewResult(repo_full_name=full_name, high_critical=[finding], findings=[finding])
+        return ReviewResult(high_critical=[finding], findings=[finding])
 
     created_calls = []
 
@@ -427,7 +430,7 @@ async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypat
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
 
     async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
-        return ReviewResult(repo_full_name=full_name, high_critical=[finding], findings=[finding])
+        return ReviewResult(high_critical=[finding], findings=[finding])
 
     github_calls = []
 
@@ -588,7 +591,7 @@ async def test_review_local_without_store_db_writes_no_state(tmp_path, monkeypat
     from secscan.reviewer import ReviewResult
 
     repo_dir = _local_repo_dir(tmp_path)
-    _patch_local_review(monkeypatch, ReviewResult(repo_full_name="local/demo-app"))
+    _patch_local_review(monkeypatch, ReviewResult())
 
     out = tmp_path / "out"
     cfg = RunConfig(output_dir=out, state_db=out / "secscan.sqlite3", no_db=True)
@@ -606,7 +609,6 @@ async def test_review_local_store_db_records_result_and_findings(tmp_path, monke
     repo_dir = _local_repo_dir(tmp_path)
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
     _patch_local_review(monkeypatch, ReviewResult(
-        repo_full_name="local/demo-app",
         findings=[finding], high_critical=[finding],
         critical_count=0, high_count=1, total_findings=1,
         duration_s=2.0, cost_usd=0.05,
@@ -633,7 +635,7 @@ async def test_review_local_store_db_records_failure(tmp_path, monkeypatch):
 
     repo_dir = _local_repo_dir(tmp_path)
     _patch_local_review(monkeypatch, ReviewResult(
-        repo_full_name="local/demo-app", error="model returned no JSON",
+        error="model returned no JSON",
     ))
 
     out = tmp_path / "out"
@@ -649,7 +651,7 @@ async def test_review_local_store_db_records_head_commit(tmp_path, monkeypatch):
     from secscan.reviewer import ReviewResult
 
     repo_dir = _local_repo_dir(tmp_path)
-    _patch_local_review(monkeypatch, ReviewResult(repo_full_name="local/demo-app"))
+    _patch_local_review(monkeypatch, ReviewResult())
 
     async def fake_head_commit(path):
         assert path.name == "demo-app"  # the reviewed dir, not the output dir

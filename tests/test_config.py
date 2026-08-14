@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from secscan.cli import _resolve_db_password, _resolve_db_ssl, _resolve_db_url, _resolve_db_user
-from secscan.config import RunConfig
+from secscan.config import ConfigError, GithubAppConfig, RunConfig
 
 
 def test_db_url_defaults_to_none():
@@ -85,9 +85,6 @@ def test_resolve_db_ssl_false_when_neither_set(monkeypatch):
 
 def test_no_db_defaults_false():
     assert RunConfig().no_db is False
-
-
-from secscan.config import ConfigError
 
 
 def test_create_issues_and_dry_run_default_false():
@@ -178,3 +175,74 @@ def test_github_host_resolve_argument_beats_env(monkeypatch):
 
 def test_run_config_github_api_url_defaults_to_none():
     assert RunConfig().github_api_url is None
+
+
+# -- GitHub App credentials -------------------------------------------------------
+
+
+def _clear_app_env(monkeypatch):
+    for var in (
+        "GITHUB_APP_ID",
+        "GITHUB_APP_CLIENT_ID",
+        "GITHUB_APP_PRIVATE_KEY",
+        "GITHUB_APP_PRIVATE_KEY_PATH",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_app_config_from_env_reads_app_id_and_inline_key(monkeypatch):
+    _clear_app_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_ID", "4254305")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----")
+    cfg = GithubAppConfig.from_env()
+    assert cfg.app_id == "4254305"
+    assert cfg.private_key == "-----BEGIN PRIVATE KEY-----"
+
+
+def test_app_config_accepts_client_id_as_the_jwt_issuer(monkeypatch):
+    """GitHub accepts an App's Client ID wherever the numeric App ID is accepted."""
+    _clear_app_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv23liV27z2aVR0QLrBp")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "pem")
+    assert GithubAppConfig.from_env().app_id == "Iv23liV27z2aVR0QLrBp"
+
+
+def test_app_config_prefers_app_id_over_client_id(monkeypatch):
+    _clear_app_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_ID", "4254305")
+    monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv23liV27z2aVR0QLrBp")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "pem")
+    assert GithubAppConfig.from_env().app_id == "4254305"
+
+
+def test_app_config_reads_the_private_key_from_a_path(monkeypatch, tmp_path):
+    _clear_app_env(monkeypatch)
+    pem = tmp_path / "app.pem"
+    pem.write_text("-----BEGIN RSA PRIVATE KEY-----\n")
+    monkeypatch.setenv("GITHUB_APP_ID", "4254305")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_PATH", str(pem))
+    assert GithubAppConfig.from_env().private_key.startswith("-----BEGIN RSA")
+
+
+def test_app_config_without_an_issuer_names_both_accepted_variables(monkeypatch):
+    _clear_app_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "pem")
+    with pytest.raises(ConfigError, match="GITHUB_APP_CLIENT_ID"):
+        GithubAppConfig.from_env()
+
+
+def test_app_config_without_a_key_says_a_client_secret_is_not_a_substitute(monkeypatch):
+    """The mistake this message exists to catch: pasting the Client Secret as the key."""
+    _clear_app_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_ID", "4254305")
+    with pytest.raises(ConfigError, match="client secret") as exc:
+        GithubAppConfig.from_env()
+    assert "Generate a private key" in str(exc.value)
+
+
+def test_app_config_unreadable_key_path_raises(monkeypatch, tmp_path):
+    _clear_app_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_APP_ID", "4254305")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_PATH", str(tmp_path / "absent.pem"))
+    with pytest.raises(ConfigError, match="GITHUB_APP_PRIVATE_KEY_PATH"):
+        GithubAppConfig.from_env()

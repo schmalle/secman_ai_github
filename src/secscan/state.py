@@ -56,7 +56,6 @@ class RepoRecord:
 class IssueRecord:
     owner: str
     repo: str
-    fingerprint: str
     issue_number: int
     issue_url: str
     first_seen_at: str
@@ -587,7 +586,7 @@ class StateStore:
         if row is None:
             return None
         return IssueRecord(
-            owner=row["owner"], repo=row["repo"], fingerprint=row["fingerprint"],
+            owner=row["owner"], repo=row["repo"],
             issue_number=row["issue_number"], issue_url=row["issue_url"],
             first_seen_at=row["first_seen_at"], last_seen_at=row["last_seen_at"],
         )

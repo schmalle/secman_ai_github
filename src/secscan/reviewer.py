@@ -39,7 +39,6 @@ DEFAULT_IDLE_TIMEOUT_S = 900.0
 
 @dataclass
 class ReviewResult:
-    repo_full_name: str
     findings: list[Finding] = field(default_factory=list)
     high_critical: list[Finding] = field(default_factory=list)
     critical_count: int = 0
@@ -48,7 +47,6 @@ class ReviewResult:
     cost_usd: float = 0.0
     duration_s: float = 0.0
     num_turns: int = 0
-    raw_text: str = ""
     error: str = ""
 
 
@@ -102,7 +100,7 @@ async def review_repo(
     idle_timeout_s: float | None = DEFAULT_IDLE_TIMEOUT_S,
 ) -> ReviewResult:
     """Review one repository directory and return validated findings + run metadata."""
-    result = ReviewResult(repo_full_name=repo_full_name)
+    result = ReviewResult()
     options = _build_options(Path(repo_dir), model, max_turns, max_cost_usd, extra_env)
 
     text_chunks: list[str] = []
@@ -143,7 +141,6 @@ async def review_repo(
             result.error = f"{type(exc).__name__}: {exc}"
 
     result.duration_s = time.perf_counter() - started
-    result.raw_text = final_text or "\n".join(text_chunks)
 
     # Prefer structured output, then the final result text, then accumulated assistant text.
     findings: list[Finding] = []

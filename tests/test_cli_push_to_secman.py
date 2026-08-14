@@ -2,7 +2,7 @@ from typer.testing import CliRunner
 
 import secscan.secman_client as secman_client
 from secscan.cli import app
-from secscan.findings import Finding, fingerprint
+from secscan.findings import Finding
 from secscan.state import StateStore
 
 runner = CliRunner()

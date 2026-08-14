@@ -7,7 +7,6 @@ from secscan.config import Filters, GithubAppConfig
 from secscan.github_app import (
     GithubAppClient,
     RepoInfo,
-    authed_clone_url,
     fetch_last_commit,
     redact_url,
     should_include,
@@ -75,11 +74,6 @@ def test_org_filter():
     f = Filters()
     assert should_include(_repo(owner="octo"), f, org="other") is False
     assert should_include(_repo(owner="octo"), f, org="octo") is True
-
-
-def test_authed_clone_url_injects_token():
-    url = authed_clone_url("https://github.com/octo/repo.git", "ghs_secret")
-    assert url == "https://x-access-token:ghs_secret@github.com/octo/repo.git"
 
 
 def test_redact_url_hides_token():
@@ -187,6 +181,44 @@ def test_github_for_account_raises_when_the_app_is_not_installed():
     client = _app_client_with_installations([_installation("other", 1)])
     with pytest.raises(OrgAccessError, match="no installation on 'acme'"):
         client.github_for_account("acme")
+
+
+def test_installation_for_account_returns_none_when_not_installed():
+    client = _app_client_with_installations([_installation("other", 1)])
+    assert client.installation_for_account("acme") is None
+
+
+# -- lookup_repo ------------------------------------------------------------------
+
+
+def test_lookup_repo_carries_the_owning_installation_id():
+    """The installation id is what lets `token_for` mint a clone token later."""
+    installation_gh = SimpleNamespace(get_repo=lambda full_name: SimpleNamespace(
+        owner=SimpleNamespace(login="acme"), name="webapp", full_name="acme/webapp",
+        archived=False, fork=False, size=250, default_branch="main",
+        clone_url="https://github.com/acme/webapp.git",
+    ))
+    client = _app_client_with_installations([_installation("acme", 7)], {7: installation_gh})
+    info = client.lookup_repo("acme", "webapp")
+    assert info.full_name == "acme/webapp"
+    assert info.installation_id == 7
+
+
+def test_lookup_repo_none_when_the_app_has_no_installation_there():
+    client = _app_client_with_installations([_installation("other", 1)])
+    assert client.lookup_repo("acme", "webapp") is None
+
+
+def test_lookup_repo_none_when_the_installation_cannot_see_the_repo():
+    from github import GithubException
+
+    def _boom(full_name):
+        raise GithubException(404, {"message": "Not Found"}, {})
+
+    client = _app_client_with_installations(
+        [_installation("acme", 7)], {7: SimpleNamespace(get_repo=_boom)}
+    )
+    assert client.lookup_repo("acme", "private") is None
 
 
 def test_app_client_iter_org_members_uses_the_installation_client():

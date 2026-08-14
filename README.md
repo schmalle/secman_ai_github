@@ -1,7 +1,7 @@
 # secscan
 
 A command-line tool that enumerates **all reachable repositories** of a GitHub App
-(and/or explicitly-added repos with a personal access token), clones each one, runs an
+(plus any explicitly-added repos), clones each one, runs an
 **autonomous Claude Code security review** over the full codebase, and writes a
 **CSV of High/Critical findings per repository** plus an aggregate `summary.csv` index.
 Findings and state also live in a database (SQLite by default, MySQL/MariaDB
@@ -11,7 +11,7 @@ optionally), and results can be emailed as an HTML report.
 
 ```
 list installations → mint installation token → list repos (filter)
-   + explicit targets (secscan repo add / --repos-file, cloned with a PAT)
+   + explicit targets (secscan repo add / --repos-file), resolved via their installation
    → shallow clone → Claude read-only security review → validate findings JSON
    → write per-repo CSV + DB findings → update state ↘ aggregate summary.csv
                                                      ↘ secscan send-report (HTML email)
@@ -29,11 +29,26 @@ treated as untrusted data (prompt-injection aware).
   out to it. Auth via `ANTHROPIC_API_KEY`, a logged-in Claude subscription, **or** an
   `OPENROUTER_API_KEY`, a Moonshot/Kimi key, or a local GitHub Copilot bridge (see
   [Choosing a provider](#choosing-a-provider---provider)).
-- GitHub credentials — one (or both) of:
-  - A **GitHub App** installed on the target org(s)/repos with permissions
-    **Contents: Read**, **Metadata: Read**. You need its App ID and a private key (`.pem`).
-  - A **personal access token** (`GITHUB_TOKEN`) with read access to the repos you
-    want to scan (classic: `repo` scope; fine-grained: Contents + Metadata read).
+- GitHub credentials. A **GitHub App** is the primary credential; a PAT is an
+  optional fallback. Either works alone.
+  - **GitHub App** — installed on the target org(s)/repos with permissions
+    **Contents: Read**, **Metadata: Read**. You need two things from its settings page
+    (*Settings → Developer settings → GitHub Apps → your app*):
+    1. Its **App ID** (or, equivalently, its **Client ID** — GitHub accepts either as
+       the JWT issuer).
+    2. A **private key**: scroll to **Private keys → Generate a private key** and keep
+       the downloaded `.pem`.
+
+    The **Client Secret** is *not* usable here. It belongs to the OAuth user-login
+    flow; an App signs its own JWT with the private key to mint installation tokens,
+    and there is no substitute for it.
+
+    Step-by-step setup, the full environment-variable reference, a verification
+    ladder and a troubleshooting table:
+    **[docs/GITHUB_APP_SETUP.md](docs/GITHUB_APP_SETUP.md)**.
+  - **Personal access token** (`GITHUB_TOKEN`) — optional fallback with read access to
+    the repos you want to scan (classic: `repo` scope; fine-grained: Contents +
+    Metadata read). Useful for repos the App is not installed on.
   - For `list-users` only, the credential also needs to see organization membership:
     a PAT with the `read:org` scope (classic) or Members: Read (fine-grained), held by
     a member of the org; or a GitHub App with the **Organization permission
@@ -52,10 +67,11 @@ the environment only and never written to disk.
 
 | Variable | Purpose |
 |---|---|
-| `GITHUB_APP_ID` | GitHub App ID |
+| `GITHUB_APP_ID` | GitHub App ID (numeric), or… |
+| `GITHUB_APP_CLIENT_ID` | …the App's Client ID — GitHub accepts either as the JWT issuer. `GITHUB_APP_ID` wins if both are set |
 | `GITHUB_APP_PRIVATE_KEY` | PEM contents, or… |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | …path to the `.pem` file |
-| `GITHUB_TOKEN` | Personal access token — alternative or complement to the App |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | …path to the `.pem` file. **Required** — the App's Client Secret cannot replace it |
+| `GITHUB_TOKEN` | Personal access token — optional fallback for repos the App is not installed on |
 | `GITHUB_API_URL` | GitHub deployment (or `--github-api-url`); unset = github.com / Enterprise Cloud. See [GitHub Enterprise](#github-enterprise-cloud-and-server) |
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
 | `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
@@ -195,17 +211,37 @@ two outward-facing integrations above.
 
 ## Authentication: GitHub App vs PAT
 
-Either credential works alone; together they complement each other.
+The App is the primary credential and is self-sufficient — it enumerates, resolves
+explicit targets, and clones on its own. The PAT is an optional fallback for repos no
+installation covers. Either works alone; together they complement each other.
+
+```bash
+export GITHUB_APP_ID=4254305                      # or GITHUB_APP_CLIENT_ID=Iv23li…
+export GITHUB_APP_PRIVATE_KEY_PATH=~/.secrets/secscan-app.pem
+uv run secscan list-repos                         # no GITHUB_TOKEN needed
+```
 
 | Configured | `run` scans | `list-repos` shows | Clone auth |
 |---|---|---|---|
-| App only | App-enumerated repos (+ targets the App can reach) | App-reachable repos | Installation tokens |
+| App only | App-enumerated repos + explicit targets on an installed account | App-reachable repos | Installation tokens |
 | PAT only | Explicit targets (`secscan repo add`) + `--repos-file` entries | Token-accessible repos | The PAT |
 | Both | Union of the above | Deduped union (App entry wins) | Installation token per App repo, PAT for the rest |
+
+An explicit target is resolved through the App first, so it clones with that
+installation's token; the PAT is consulted only when no installation owns the account.
 
 PAT-only mode deliberately does **not** scan everything the token can see — a
 personal token often reaches thousands of repos, and an accidental full scan is a
 cost hazard. Add repos explicitly (`secscan repo add`), or pass `--repos-file`.
+
+**Why not the Client ID + Client Secret pair?** Those drive GitHub's OAuth
+*user*-login flow, which needs a browser redirect and yields an expiring token
+scoped to a person. Server-to-server access — what a scanner needs — goes through
+an App JWT signed with the private key, exchanged for a 1-hour installation token.
+That is the flow implemented here, and the same one
+[secman](https://github.com/schmalle/secman) uses in `GithubAppClientService`.
+
+See **[docs/GITHUB_APP_SETUP.md](docs/GITHUB_APP_SETUP.md)** for the full setup walkthrough.
 
 ## GitHub Enterprise (Cloud and Server)
 
@@ -233,8 +269,8 @@ uv run secscan list-users --org my-org --github-api-url https://ghes.example.com
 GITHUB_API_URL=https://acme.ghe.com uv run secscan run --org my-org
 ```
 
-The credential itself does not change: `GITHUB_APP_ID` + private key, or `GITHUB_TOKEN`,
-issued by that deployment.
+The credential itself does not change: `GITHUB_APP_ID` (or `GITHUB_APP_CLIENT_ID`) +
+private key, or `GITHUB_TOKEN`, issued by that deployment.
 
 ## Listing organization users
 
@@ -299,9 +335,9 @@ use `secscan run --targets-only` (a `--repos-file` allowlist still applies;
 `--org` does not, since it only filters App enumeration). To scan one specific
 remote repo on demand without registering it as a target, use
 `secscan scan owner/name`; it clones, reviews, and records the result the same way
-`run` does for a single repo, but doesn't add it to the target list. `scan` requires
-a PAT: a single-repo scan doesn't enumerate App installations, so an App-only
-credential has no installation token to clone with.
+`run` does for a single repo, but doesn't add it to the target list. `scan` works with
+App-only credentials: it locates the installation owning `owner` and clones with that
+installation's token, falling back to the PAT when the App is not installed there.
 
 ## Creating GitHub issues
 
