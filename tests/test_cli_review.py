@@ -41,6 +41,9 @@ def test_review_store_db_enables_the_state_store(tmp_path, monkeypatch):
 
 
 def test_review_db_flags_reach_config(tmp_path, monkeypatch):
+    # DB_PASSWORD is env-only by design (no --db-password flag, to keep it out of
+    # `ps`/`/proc/<pid>/cmdline`) — every other DB setting still comes from a flag.
+    monkeypatch.setenv("DB_PASSWORD", "pw")
     captured = {}
     _capture_review_local(monkeypatch, captured)
 
@@ -48,7 +51,7 @@ def test_review_db_flags_reach_config(tmp_path, monkeypatch):
         app,
         ["review", str(tmp_path), "--output-dir", str(tmp_path), "--store-db",
          "--db-url", "mysql://host:3306/secscan",
-         "--db-user", "scanner", "--db-password", "pw", "--db-ssl"],
+         "--db-user", "scanner", "--db-ssl"],
     )
 
     assert result.exit_code == 0, result.output

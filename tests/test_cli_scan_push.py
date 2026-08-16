@@ -32,7 +32,10 @@ def _capture_scan_repo(monkeypatch, captured, started):
 
 
 def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
+    # SECMAN_PASSWORD is env-only by design (no --secman-password flag, to keep it
+    # out of `ps`/`/proc/<pid>/cmdline`) — url/username still come from flags.
     _no_secman_env(monkeypatch)
+    monkeypatch.setenv("SECMAN_PASSWORD", "pw")
     captured, started = {}, []
     _capture_scan_repo(monkeypatch, captured, started)
 
@@ -40,7 +43,7 @@ def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
         app,
         ["scan", "octo/demo", "--output-dir", str(tmp_path), "--push-to-secman",
          "--secman-url", "https://secman.example.com",
-         "--secman-username", "vulnbot", "--secman-password", "pw"],
+         "--secman-username", "vulnbot"],
     )
 
     assert result.exit_code == 0, result.output
@@ -53,6 +56,7 @@ def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
 
 def test_run_push_flags_reach_config(tmp_path, monkeypatch):
     _no_secman_env(monkeypatch)
+    monkeypatch.setenv("SECMAN_PASSWORD", "pw")
     captured = {}
 
     async def fake_run_scan(cfg, **kwargs):
@@ -64,7 +68,7 @@ def test_run_push_flags_reach_config(tmp_path, monkeypatch):
         app,
         ["run", "--output-dir", str(tmp_path), "--push-to-secman",
          "--secman-url", "https://secman.example.com",
-         "--secman-username", "vulnbot", "--secman-password", "pw"],
+         "--secman-username", "vulnbot"],
     )
 
     assert result.exit_code == 0, result.output
