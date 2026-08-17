@@ -53,9 +53,21 @@ _PATTERNS = [
     # Generic Bearer/Authorization header value
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]{20,}={0,2}"),
     # Generic labelled secret assignment: password/api_key/secret/token = <value>
+    #
+    # The label boundary is intentionally *not* `\b` here: `\b` treats `_` as a
+    # word character, so it never matches between an underscore-joined prefix
+    # and the label itself -- and underscore-joined prefixes are how almost
+    # every real secret is actually named (DATABASE_PASSWORD, JWT_SECRET,
+    # ANTHROPIC_API_KEY, STRIPE_SECRET_KEY, ...). `(?<![A-Za-z0-9])` /
+    # `(?![A-Za-z0-9])` are zero-width like `\b`, but only alphanumerics count
+    # as "part of the same word", so `_`/`-` (and start/end of string) still
+    # count as a boundary. `secret(?:[_-]?key)?` additionally lets the label
+    # absorb a trailing `_KEY`/`-KEY` (e.g. `STRIPE_SECRET_KEY`) so the whole
+    # compound name is consumed before the `[:=]` separator is expected.
     re.compile(
-        r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?token|"
-        r"auth[_-]?token|client[_-]?secret)\b\s*[:=]\s*['\"]?([^\s'\",;]{6,})['\"]?"
+        r"(?i)(?<![A-Za-z0-9])(password|passwd|pwd|secret(?:[_-]?key)?|"
+        r"api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)"
+        r"(?![A-Za-z0-9])\s*[:=]\s*['\"]?([^\s'\",;]{6,})['\"]?"
     ),
 ]
 
