@@ -338,3 +338,76 @@ def test_scan_github_api_url_defaults_to_none(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert captured["cfg"].github_api_url is None
+
+
+# -- state-DB credentials: no CLI flag for the password, and env vars actually work ---
+#
+# CWE-214: a --db-password flag would put the state-DB password in argv, readable by
+# any co-resident user via `ps`/`/proc/<pid>/cmdline` and often captured verbatim in
+# shell history or a CI job's echoed command line — the same threat model cloner.py
+# already protects the GitHub clone token against (see its module docstring). run/scan
+# used to forward db_user/db_password/db_ssl to RunConfig unresolved (unlike `review`,
+# which already called the _resolve_db_* helpers), so DB_USERNAME/DB_PASSWORD/DB_SSL
+# silently had no effect on these two commands and --db-password was the *only* way to
+# authenticate — these tests cover both: the flag is gone, and the env vars now work.
+
+
+def test_scan_has_no_db_password_flag(tmp_path):
+    result = runner.invoke(
+        app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--db-password", "pw"]
+    )
+    assert result.exit_code != 0
+    assert "No such option: --db-password" in result.output
+
+
+def test_run_has_no_db_password_flag(tmp_path):
+    result = runner.invoke(app, ["run", "--output-dir", str(tmp_path), "--db-password", "pw"])
+    assert result.exit_code != 0
+    assert "No such option: --db-password" in result.output
+
+
+def test_scan_db_env_vars_reach_config(tmp_path, monkeypatch):
+    """Regression: previously silently ignored for `scan` (unlike `review`)."""
+    import secscan.orchestrator
+
+    monkeypatch.setenv("DB_USERNAME", "envuser")
+    monkeypatch.setenv("DB_PASSWORD", "envpw")
+    monkeypatch.setenv("DB_SSL", "true")
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(
+        app,
+        ["scan", "octo/demo", "--output-dir", str(tmp_path), "--db-url", "mysql://host:3306/x"],
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = captured["cfg"]
+    assert (cfg.db_user, cfg.db_password, cfg.db_ssl) == ("envuser", "envpw", True)
+
+
+def test_run_db_env_vars_reach_config(tmp_path, monkeypatch):
+    """Regression: previously silently ignored for `run` (unlike `review`)."""
+    import secscan.orchestrator
+
+    monkeypatch.setenv("DB_USERNAME", "envuser")
+    monkeypatch.setenv("DB_PASSWORD", "envpw")
+    monkeypatch.setenv("DB_SSL", "true")
+    captured = {}
+
+    async def fake_run_scan(cfg, **kwargs):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(
+        app, ["run", "--output-dir", str(tmp_path), "--db-url", "mysql://host:3306/x"]
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = captured["cfg"]
+    assert (cfg.db_user, cfg.db_password, cfg.db_ssl) == ("envuser", "envpw", True)

@@ -41,6 +41,10 @@ def test_review_store_db_enables_the_state_store(tmp_path, monkeypatch):
 
 
 def test_review_db_flags_reach_config(tmp_path, monkeypatch):
+    """--db-password does not exist: DB_PASSWORD (env) is the only way to supply it,
+    so it can never land in argv/`ps`/shell history. --db-user is a plain identifier,
+    not a secret, so it stays a flag."""
+    monkeypatch.setenv("DB_PASSWORD", "pw")
     captured = {}
     _capture_review_local(monkeypatch, captured)
 
@@ -48,13 +52,21 @@ def test_review_db_flags_reach_config(tmp_path, monkeypatch):
         app,
         ["review", str(tmp_path), "--output-dir", str(tmp_path), "--store-db",
          "--db-url", "mysql://host:3306/secscan",
-         "--db-user", "scanner", "--db-password", "pw", "--db-ssl"],
+         "--db-user", "scanner", "--db-ssl"],
     )
 
     assert result.exit_code == 0, result.output
     cfg = captured["cfg"]
     assert cfg.state_target == "mysql://host:3306/secscan"
     assert (cfg.db_user, cfg.db_password, cfg.db_ssl) == ("scanner", "pw", True)
+
+
+def test_review_has_no_db_password_flag(tmp_path):
+    """A CLI flag for this credential would land in argv/`ps`/shell history."""
+    result = runner.invoke(app, ["review", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--db-password" not in result.output
 
 
 def test_review_db_env_vars_are_honoured(tmp_path, monkeypatch):

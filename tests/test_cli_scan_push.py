@@ -32,7 +32,12 @@ def _capture_scan_repo(monkeypatch, captured, started):
 
 
 def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
+    """--secman-password does not exist: SECMAN_PASSWORD (env) is the only way to
+    supply it, so an ADMIN/VULN-role secman credential can never land in argv/`ps`/
+    shell history/a CI log. --secman-url/--secman-username are plain identifiers,
+    not secrets, so they stay flags."""
     _no_secman_env(monkeypatch)
+    monkeypatch.setenv("SECMAN_PASSWORD", "pw")
     captured, started = {}, []
     _capture_scan_repo(monkeypatch, captured, started)
 
@@ -40,7 +45,7 @@ def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
         app,
         ["scan", "octo/demo", "--output-dir", str(tmp_path), "--push-to-secman",
          "--secman-url", "https://secman.example.com",
-         "--secman-username", "vulnbot", "--secman-password", "pw"],
+         "--secman-username", "vulnbot"],
     )
 
     assert result.exit_code == 0, result.output
@@ -53,6 +58,7 @@ def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
 
 def test_run_push_flags_reach_config(tmp_path, monkeypatch):
     _no_secman_env(monkeypatch)
+    monkeypatch.setenv("SECMAN_PASSWORD", "pw")
     captured = {}
 
     async def fake_run_scan(cfg, **kwargs):
@@ -64,12 +70,25 @@ def test_run_push_flags_reach_config(tmp_path, monkeypatch):
         app,
         ["run", "--output-dir", str(tmp_path), "--push-to-secman",
          "--secman-url", "https://secman.example.com",
-         "--secman-username", "vulnbot", "--secman-password", "pw"],
+         "--secman-username", "vulnbot"],
     )
 
     assert result.exit_code == 0, result.output
     assert captured["cfg"].push_to_secman is True
     assert captured["cfg"].secman_url == "https://secman.example.com"
+    assert captured["cfg"].secman_password == "pw"
+
+
+def test_scan_and_run_have_no_secman_password_flag(tmp_path):
+    """A CLI flag for this credential would land in argv/`ps`/shell history."""
+    for args in (
+        ["scan", "octo/demo", "--secman-password", "pw"],
+        ["run", "--secman-password", "pw"],
+        ["push-to-secman", "--secman-password", "pw"],
+    ):
+        result = runner.invoke(app, args)
+        assert result.exit_code != 0
+        assert "No such option: --secman-password" in result.output
 
 
 def test_scan_push_credentials_come_from_env(tmp_path, monkeypatch):

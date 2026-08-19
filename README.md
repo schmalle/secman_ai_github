@@ -83,14 +83,14 @@ the environment only and never written to disk.
 | `COPILOT_MODEL` | Copilot model the default `--model` alias resolves to (default `claude-sonnet-4.5`) |
 | `SECSCAN_DB_URL` | `mysql://user:pass@host:3306/secscan` for state + findings + targets; unset = local SQLite |
 | `DB_USERNAME` | MySQL/MariaDB username (or `--db-user`); overrides any user embedded in `SECSCAN_DB_URL` |
-| `DB_PASSWORD` | MySQL/MariaDB password (or `--db-password`); overrides any password embedded in `SECSCAN_DB_URL` |
+| `DB_PASSWORD` | MySQL/MariaDB password; overrides any password embedded in `SECSCAN_DB_URL`. **Env var only — no `--db-password` flag**, so it can never land in argv/`ps`/shell history |
 | `DB_SSL` | Encrypt the MySQL/MariaDB connection (or `--db-ssl`); truthy values are `"true"` and `"1"` |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | SMTP credentials for `send-report` |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP server for `--email-provider custom` (port defaults to 587) |
 | `SMTP_FROM` | From address (defaults to `SMTP_USERNAME`) |
 | `SECMAN_URL` | secman base URL (or `--secman-url`), for `push-to-secman` and `scan`/`run --push-to-secman` |
 | `SECMAN_USERNAME` | secman username (or `--secman-username`); needs ADMIN or VULN role |
-| `SECMAN_PASSWORD` | secman password (or `--secman-password`) |
+| `SECMAN_PASSWORD` | secman password. **Env var only — no `--secman-password` flag**, so this ADMIN/VULN-role credential can never land in argv/`ps`/shell history |
 | `SECSCAN_DRY_RUN` | `1`/`true`/`yes`/`on` forces `--dry-run` on `run`, `scan`, and `push-to-secman` |
 
 ## Usage
@@ -129,16 +129,18 @@ uv run secscan run --dry-run                               # no issues opened, n
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-password --db-ssl --no-db --store-db --create-issues --push-to-secman --secman-url --secman-username --secman-password --dry-run --issue-prefix --keep-clones
+--model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-ssl --no-db --store-db --create-issues --push-to-secman --secman-url --secman-username --dry-run --issue-prefix --keep-clones
 --branch --no-resume --limit --targets-only --repos-file --github-api-url --org-repos
---format --output --no-csv`.
+--format --output --no-csv`. There is deliberately no `--db-password` or
+`--secman-password` flag — set `DB_PASSWORD` / `SECMAN_PASSWORD` (env vars) instead, so
+neither password can land in argv/`ps`/shell history.
 
 `list-repos` prints one tab-separated line per repo: `owner/name`, size in KB, then the
 latest commit on the branch GitHub reports as HEAD — short SHA and `YYYY-MM-DD` date, or
 `-` `-` if the repo is empty or unreadable. Each commit found is also recorded in the
 state DB (`last_commit_sha`, `last_commit_date` on the `repos` table) without disturbing
-the repo's scan status; `--output-dir`, `--db-url`, `--db-user`, `--db-password` and
-`--db-ssl` select the database, and `--no-db` prints without storing.
+the repo's scan status; `--output-dir`, `--db-url`, `--db-user` and `--db-ssl` (plus
+the `DB_PASSWORD` env var) select the database, and `--no-db` prints without storing.
 
 The commit lookup costs one extra API call per repo. `--no-last-commit` skips it — the
 line is then just `owner/name` and size, and nothing is written to the DB.
@@ -165,9 +167,10 @@ rebuilt from the state store. Useful for one-off scans where you don't want
 default. With it, the local review is recorded like any scanned repo — under owner
 `local` and the directory name (`local/my-app`), with its High/Critical findings, the
 reviewed `git log -1` commit (blank if the directory is not a git repo), cost and
-duration — and `summary.csv` is rebuilt. `--db-url`, `--db-user`, `--db-password` and
-`--db-ssl` (or `SECSCAN_DB_URL` / `DB_USERNAME` / `DB_PASSWORD` / `DB_SSL`) select the
-database, exactly as on `run`/`scan`. Reviewing the same directory again replaces its
+duration — and `summary.csv` is rebuilt. `--db-url`, `--db-user` and `--db-ssl` (or
+`SECSCAN_DB_URL` / `DB_USERNAME` / `DB_SSL`, plus the `DB_PASSWORD` env var — there is
+no `--db-password` flag) select the database, exactly as on `run`/`scan`. Reviewing
+the same directory again replaces its
 findings, and `stats`, `report` and `push-to-secman` then see local reviews alongside
 GitHub ones. `--create-issues` remains `run`/`scan`-only — a local directory has no
 GitHub repo to file against.
@@ -390,14 +393,18 @@ uv run secscan push-to-secman --dry-run   # preview what would be pushed
 uv run secscan push-to-secman             # actually push
 ```
 
-Note that `--db-url`/`--db-user`/`--db-password` are unrelated to these: they
-configure secscan's *own* state store. secman is only ever reached over HTTPS.
+Note that `--db-url`/`--db-user` (plus the `DB_PASSWORD` env var) are unrelated to
+these: they configure secscan's *own* state store. secman is only ever reached over
+HTTPS. `SECMAN_PASSWORD` above is deliberately an environment variable, not a flag —
+there is no `--secman-password`, so this ADMIN/VULN-role credential can never land
+in argv/`ps`/shell history.
 
 ### Pushing straight from a scan
 
-`scan` and `run` accept `--push-to-secman` and the same three credential options
-(`--secman-url`, `--secman-username`, `--secman-password`, each falling back to
-its `SECMAN_*` environment variable), so a review and its push are one command:
+`scan` and `run` accept `--push-to-secman` and the same credential options
+(`--secman-url`, `--secman-username`, each falling back to its `SECMAN_*`
+environment variable, plus the `SECMAN_PASSWORD` env var), so a review and its
+push are one command:
 
 ```bash
 uv run secscan scan octo/webapp --push-to-secman
