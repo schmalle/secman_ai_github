@@ -33,3 +33,17 @@ integration changes (the secman push command, its client, credential handling,
 or the request/response shape), **check the `secman` repository** — its API
 contract, auth requirements, or `cli-add` behavior may have moved — before
 assuming the existing integration still matches.
+
+## Security skills
+
+`--skill` appends operator-chosen `SKILL.md` packs (`src/secscan/skills.py`;
+bundled ones under `src/secscan/skills/<name>/`) to the reviewer's system prompt.
+Two rules keep this safe: skills are loaded **only** from paths named on the CLI —
+never via `setting_sources`/`plugins`/Claude Code skill discovery, which would also
+load the scanned repo's attacker-controlled `.claude/` directory — and they **never
+widen the tool set** (the reviewer stays `Read`/`Grep`/`Glob`). A bundled skill
+must be pure reasoning guidance (no "run semgrep", no report writing), keep the JSON
+contract and severity rubric from `prompts.py`, and stay concise (it is re-sent every
+turn). `tests/test_skills.py` checks every bundled skill loads; the evaluation of
+external skills and the rationale live in `docs/SECURITY_SKILLS.md` — update it when
+adding or changing a bundled skill.

@@ -135,7 +135,7 @@ async def test_process_repo_forwards_timeout_to_review(tmp_path, monkeypatch):
     async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
-    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s, skills=()):
         captured["idle_timeout_s"] = idle_timeout_s
         return ReviewResult()
 
@@ -251,7 +251,7 @@ async def test_process_repo_skips_store_when_no_db(tmp_path, monkeypatch):
     async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
-    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s, skills=()):
         return ReviewResult()
 
     monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
@@ -279,7 +279,7 @@ async def _patch_clone_and_review(monkeypatch, tmp_path):
     async def fake_clone(repo, token, root, branch=None):
         return tmp_path / "clone"
 
-    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s, skills=()):
         return ReviewResult()
 
     monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
@@ -366,7 +366,7 @@ async def test_process_repo_creates_issues_when_enabled(
 
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
 
-    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s, skills=()):
         return ReviewResult(high_critical=[finding], findings=[finding])
 
     created_calls = []
@@ -429,7 +429,7 @@ async def test_process_repo_dry_run_creates_no_github_client(tmp_path, monkeypat
 
     finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
 
-    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s, skills=()):
         return ReviewResult(high_critical=[finding], findings=[finding])
 
     github_calls = []
@@ -576,7 +576,7 @@ def _local_repo_dir(tmp_path):
 
 
 def _patch_local_review(monkeypatch, result):
-    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s):
+    async def fake_review_repo(path, full_name, *, model, max_turns, max_cost_usd, extra_env, idle_timeout_s, skills=()):
         return result
 
     monkeypatch.setattr(orch, "review_repo", fake_review_repo)
@@ -666,3 +666,59 @@ async def test_review_local_store_db_records_head_commit(tmp_path, monkeypatch):
     rec = StateStore(cfg.state_target).get("local", "demo-app")
     assert rec.last_commit_sha == "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
     assert rec.last_commit_date == "2026-08-01"
+
+
+async def test_process_repo_forwards_skills_to_review(tmp_path, monkeypatch, capsys):
+    from secscan.reviewer import ReviewResult
+    from secscan.skills import Skill
+
+    captured = {}
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        captured["skills"] = kwargs["skills"]
+        return ReviewResult()
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    pack = Skill(name="pack", description="", body="x", path=tmp_path / "pack")
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", skills=[pack])
+    store = StateStore(cfg.state_target)
+    provider_env = orch._resolve_provider_env(cfg)
+
+    await orch._process_repo(_repo(name="demo"), object(), store, cfg, asyncio.Semaphore(1), provider_env)
+
+    assert captured["skills"] == [pack]
+    assert "Skills: pack" in capsys.readouterr().out
+
+
+async def test_review_local_forwards_skills_to_review(tmp_path, monkeypatch):
+    from secscan.reviewer import ReviewResult
+    from secscan.skills import Skill
+
+    captured = {}
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        captured["skills"] = kwargs["skills"]
+        return ReviewResult()
+
+    async def fake_head_commit(path):
+        return None
+
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "head_commit", fake_head_commit)
+
+    pack = Skill(name="pack", description="", body="x", path=tmp_path / "pack")
+    out = tmp_path / "out"
+    cfg = RunConfig(output_dir=out, state_db=out / "secscan.sqlite3", no_db=True, skills=[pack])
+    await orch.review_local(cfg, _local_repo_dir(tmp_path))
+
+    assert captured["skills"] == [pack]

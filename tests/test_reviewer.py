@@ -160,3 +160,39 @@ async def test_review_idle_timeout_disabled_by_zero(tmp_path, monkeypatch):
     _patch(monkeypatch, [FakeResult(result="", cost=0.0, turns=1)])
     res = await review_repo(tmp_path, "octo/repo", idle_timeout_s=0)
     assert res.error == ""
+
+
+async def test_review_appends_skills_to_system_prompt_and_add_dirs(tmp_path, monkeypatch):
+    from secscan.prompts import SYSTEM_PROMPT
+    from secscan.skills import Skill
+
+    captured = {}
+    _patch(monkeypatch, [FakeResult(result="", cost=0.0, turns=1)], captured)
+    skill_dir = tmp_path / "pack"
+    skill_dir.mkdir()
+    skill = Skill(name="pack", description="d", body="Grep for SKILLMARKER.", path=skill_dir)
+
+    await review_repo(tmp_path, "octo/repo", skills=[skill])
+
+    opts = captured["options"]
+    assert opts.system_prompt.startswith(SYSTEM_PROMPT)  # base rubric and contract intact
+    assert "SKILLMARKER" in opts.system_prompt
+    assert "## Skill: pack" in opts.system_prompt
+    assert opts.add_dirs == [str(skill_dir)]
+    # Skills must never widen the tool set or re-enable host/project settings.
+    assert opts.allowed_tools == reviewer.READ_ONLY_TOOLS
+    assert opts.disallowed_tools == reviewer.DENIED_TOOLS
+    assert opts.setting_sources == []
+
+
+async def test_review_without_skills_leaves_prompt_and_dirs_untouched(tmp_path, monkeypatch):
+    from secscan.prompts import SYSTEM_PROMPT
+
+    captured = {}
+    _patch(monkeypatch, [FakeResult(result="", cost=0.0, turns=1)], captured)
+
+    await review_repo(tmp_path, "octo/repo")
+
+    opts = captured["options"]
+    assert opts.system_prompt == SYSTEM_PROMPT
+    assert not opts.add_dirs

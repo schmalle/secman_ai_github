@@ -128,6 +128,8 @@ def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
     hint = model_hint(provider_env, cfg.model)
     if hint:
         typer.echo(hint)
+    if cfg.skills:
+        typer.echo("Skills: " + ", ".join(s.name for s in cfg.skills))
     return provider_env
 
 
@@ -158,6 +160,7 @@ async def _process_repo(
                 max_cost_usd=cfg.max_cost_usd,
                 extra_env=provider_env.env,
                 idle_timeout_s=cfg.timeout_s,
+                skills=cfg.skills,
             )
 
             csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
@@ -353,7 +356,7 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
         res = await review_repo(
             path, full_name, model=cfg.model, max_turns=cfg.max_turns,
             max_cost_usd=cfg.max_cost_usd, extra_env=provider_env.env,
-            idle_timeout_s=cfg.timeout_s,
+            idle_timeout_s=cfg.timeout_s, skills=cfg.skills,
         )
 
         csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"

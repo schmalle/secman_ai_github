@@ -11,6 +11,7 @@ Commands:
   repo        manage explicitly-added scan targets (add / list / remove)
   send-report email the latest results as an HTML report (Gmail / O365 / custom SMTP)
   push-to-secman push High/Critical findings from the state DB into secman
+  skills      list / show the bundled security skill packs usable with --skill
 
 `--dry-run` (on run / scan / push-to-secman, or SECSCAN_DRY_RUN=1 for all three)
 means no external writes: no GitHub issue is opened and nothing reaches secman.
@@ -19,6 +20,10 @@ It also arms the guard in dryrun.py — see that module and CLAUDE.md.
 `--github-api-url` (on run / scan / list-repos / list-users, or GITHUB_API_URL for
 all four) selects the GitHub deployment: github.com / Enterprise Cloud by default,
 Enterprise Cloud with data residency, or Enterprise Server.
+
+`--skill` (repeatable, on run / scan / review) appends operator-chosen security
+skill packs — bundled names or paths to Agent-Skills-format directories — to the
+reviewer's system prompt. See skills.py and docs/SECURITY_SKILLS.md.
 """
 
 from __future__ import annotations
@@ -60,6 +65,19 @@ stats_app = typer.Typer(
     help="Scan statistics from the state database.",
 )
 app.add_typer(stats_app, name="stats")
+
+skills_app = typer.Typer(
+    add_completion=False,
+    help="Security skill packs that --skill can add to a review.",
+)
+app.add_typer(skills_app, name="skills")
+
+_SKILL_HELP = (
+    "Add a security skill pack to the review (repeatable): a bundled name — see "
+    "`secscan skills list` — or a path to a directory holding a SKILL.md in the Agent "
+    "Skills format. Skill text is trusted operator input appended to the reviewer's "
+    "system prompt; the reviewer stays read-only. Larger prompts cost more per turn."
+)
 
 
 def _resolve_db_url(db_url: str | None) -> str | None:
@@ -193,6 +211,7 @@ def _run_config(
     smtp_port: int | None = None,
     email_subject: str | None = None,
     github_api_url: str | None = None,
+    skills: list[str] | None = None,
 ) -> RunConfig:
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
@@ -217,6 +236,7 @@ def _run_config(
         # here, before an expensive review runs against an unconfigured push.
         if not dry_run and not (secman_url and secman_username and secman_password):
             raise ConfigError(_SECMAN_CREDS_MISSING)
+    loaded_skills = _load_skills(skills)
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
@@ -253,7 +273,20 @@ def _run_config(
         smtp_host=smtp_host,
         smtp_port=smtp_port,
         email_subject=email_subject,
+        skills=loaded_skills,
     )
+
+
+def _load_skills(refs: list[str] | None) -> list:
+    """Resolve --skill references up front, so a typo fails before any clone/review."""
+    if not refs:
+        return []
+    from .skills import SkillError, load_skills
+
+    try:
+        return load_skills(refs)
+    except SkillError as exc:
+        raise ConfigError(f"--skill: {exc}") from exc
 
 
 def _validate_email_config(cfg: RunConfig) -> None:
@@ -326,6 +359,7 @@ def run(
     smtp_host: str = typer.Option(None, help="SMTP host (custom provider); defaults to SMTP_HOST."),
     smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
     subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
+    skill: list[str] = typer.Option(None, "--skill", help=_SKILL_HELP),
 ) -> None:
     """Enumerate, clone, and security-review reachable repositories."""
     import asyncio
@@ -344,7 +378,7 @@ def run(
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
-            github_api_url=github_api_url,
+            github_api_url=github_api_url, skills=skill,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:
@@ -594,20 +628,25 @@ def review(
     timeout: float = typer.Option(
         900.0, help="Abort if the agent stalls (no output) this long, in seconds; 0 disables."
     ),
+    skill: list[str] = typer.Option(None, "--skill", help=_SKILL_HELP),
 ) -> None:
     """Security-review a single local repository directory."""
     import asyncio
 
     from .orchestrator import review_local
 
-    cfg = _run_config(
-        output_dir, 1, model, max_turns, max_cost_usd,
-        False, False, 0, True, True, None,
-        db_url=_resolve_db_url(db_url), db_user=_resolve_db_user(db_user),
-        db_password=_resolve_db_password(db_password), db_ssl=_resolve_db_ssl(db_ssl),
-        no_db=not store_db,
-        provider=provider, timeout_s=timeout,
-    )
+    try:
+        cfg = _run_config(
+            output_dir, 1, model, max_turns, max_cost_usd,
+            False, False, 0, True, True, None,
+            db_url=_resolve_db_url(db_url), db_user=_resolve_db_user(db_user),
+            db_password=_resolve_db_password(db_password), db_ssl=_resolve_db_ssl(db_ssl),
+            no_db=not store_db,
+            provider=provider, timeout_s=timeout, skills=skill,
+        )
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
     asyncio.run(review_local(cfg, path))
 
 
@@ -652,6 +691,7 @@ def scan(
     smtp_host: str = typer.Option(None, help="SMTP host (custom provider); defaults to SMTP_HOST."),
     smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
     subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
+    skill: list[str] = typer.Option(None, "--skill", help=_SKILL_HELP),
 ) -> None:
     """Clone one remote repository and security-review it (requires a PAT — single-repo
     scans don't enumerate App installations, so App-only credentials can't clone here)."""
@@ -672,7 +712,7 @@ def scan(
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
-            github_api_url=github_api_url,
+            github_api_url=github_api_url, skills=skill,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:
@@ -1033,6 +1073,39 @@ def repo_remove(
     else:
         typer.echo(f"Not a target: {owner}/{name}", err=True)
         raise typer.Exit(1)
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """List the bundled security skill packs (name, then description)."""
+    from .skills import bundled_skills
+
+    found = bundled_skills()
+    if not found:
+        typer.echo("No bundled skills found.")
+        return
+    for s in found:
+        typer.echo(f"{s.name}\t{s.description}")
+    typer.echo(
+        "\nUse with: secscan run|scan|review --skill <name> [--skill <name-or-path> ...]",
+        err=True,
+    )
+
+
+@skills_app.command("show")
+def skills_show(
+    name: str = typer.Argument(..., help="Bundled skill name, or a path to a skill directory / SKILL.md."),
+) -> None:
+    """Print a skill's SKILL.md exactly as the reviewer will receive it."""
+    from .skills import SkillError, resolve_skill
+
+    try:
+        skill = resolve_skill(name)
+    except SkillError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(f"# {skill.name}  ({skill.skill_md})", err=True)
+    typer.echo(skill.skill_md.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

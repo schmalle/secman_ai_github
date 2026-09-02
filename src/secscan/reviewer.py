@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from claude_agent_sdk import (
 
 from .findings import Finding, filter_high_critical, parse_findings
 from .prompts import SYSTEM_PROMPT, task_prompt
+from .skills import Skill, render_skills_prompt, skill_dirs
 
 # Read-only tool allowlist. Everything else is denied (defense in depth + permission_mode).
 # Agent/Task must stay denied: left open, the review model spawns sub-agents to explore
@@ -56,10 +57,13 @@ def _build_options(
     max_turns: int,
     max_cost_usd: float | None,
     extra_env: dict[str, str] | None = None,
+    skills: Sequence[Skill] = (),
 ) -> ClaudeAgentOptions:
     kwargs = dict(
         cwd=str(repo_dir),
-        system_prompt=SYSTEM_PROMPT,
+        # Operator-chosen skills ride along in the system prompt (never via
+        # setting_sources: that would also load the scanned repo's .claude/).
+        system_prompt=SYSTEM_PROMPT + render_skills_prompt(skills),
         allowed_tools=READ_ONLY_TOOLS,
         disallowed_tools=DENIED_TOOLS,
         permission_mode="default",
@@ -67,6 +71,10 @@ def _build_options(
         max_turns=max_turns,
         setting_sources=[],  # hermetic: do not load host settings/CLAUDE.md
     )
+    if skills:
+        # Reference files next to a SKILL.md are readable without a permission
+        # prompt (which nothing could answer here — see the idle timeout).
+        kwargs["add_dirs"] = skill_dirs(skills)
     if max_cost_usd is not None:
         kwargs["max_budget_usd"] = max_cost_usd
     if extra_env:
@@ -98,10 +106,13 @@ async def review_repo(
     max_cost_usd: float | None = None,
     extra_env: dict[str, str] | None = None,
     idle_timeout_s: float | None = DEFAULT_IDLE_TIMEOUT_S,
+    skills: Sequence[Skill] = (),
 ) -> ReviewResult:
     """Review one repository directory and return validated findings + run metadata."""
     result = ReviewResult()
-    options = _build_options(Path(repo_dir), model, max_turns, max_cost_usd, extra_env)
+    options = _build_options(
+        Path(repo_dir), model, max_turns, max_cost_usd, extra_env, skills=skills
+    )
 
     text_chunks: list[str] = []
     final_text = ""
