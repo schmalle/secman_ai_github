@@ -7,6 +7,7 @@ repository code is never executed and the host's user settings/CLAUDE.md do not 
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -35,6 +36,57 @@ DENIED_TOOLS = ["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"
 # the gap between messages, not total review duration, since reviews legitimately
 # vary widely in length.
 DEFAULT_IDLE_TIMEOUT_S = 900.0
+
+# Environment variables from secscan's own process that the review subprocess is
+# allowed to see. Kept deliberately small: PATH/HOME so the `claude` CLI binary
+# and its on-disk credentials (a logged-in claude.ai subscription) can be found,
+# locale/tmp-dir plumbing that carries no secret material, and the three
+# Anthropic-compatible provider-routing vars so `--provider anthropic` (the
+# default, whose `extra_env` is empty) still authenticates via ANTHROPIC_API_KEY
+# when no subscription login is present. `extra_env` (see providers.py) always
+# overrides these on top for every other provider.
+#
+# IMPORTANT: the underlying SDK
+# (`claude_agent_sdk._internal.transport.subprocess_cli.SubprocessCLITransport.connect`)
+# unconditionally merges the *entire* parent process environment underneath
+# whatever `ClaudeAgentOptions.env` we pass it -- `inherited_env = {k: v for k, v
+# in os.environ.items() if k != "CLAUDECODE"}` is always the base layer, and our
+# dict only overrides on top of that. So handing the SDK a small `env` dict does
+# not, by itself, withhold anything from the untrusted review subprocess -- the
+# only way to actually keep a variable out is to explicitly override it to ""
+# ourselves, which is what `_subprocess_env` does below for every variable not
+# on this allowlist. This is the control standing between a prompt injection in
+# a scanned repo and secscan's own GITHUB_TOKEN, GITHUB_APP_PRIVATE_KEY,
+# SECMAN_PASSWORD, SMTP_PASSWORD, DB_PASSWORD, etc.
+_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "TMPDIR",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+    }
+)
+
+
+def _subprocess_env(extra_env: dict[str, str] | None) -> dict[str, str]:
+    """Build the explicit, minimal env for the review subprocess.
+
+    Every variable currently set in secscan's own process is blanked to ""
+    unless it is on `_ENV_ALLOWLIST` above or is one of the provider-routing
+    overrides in `extra_env` (which always wins). See `_ENV_ALLOWLIST` for why
+    blanking -- not simply omitting a key -- is required given how the SDK
+    merges environments.
+    """
+    env = {name: "" for name in os.environ if name not in _ENV_ALLOWLIST}
+    env.update({name: os.environ[name] for name in _ENV_ALLOWLIST if name in os.environ})
+    if extra_env:
+        env.update(extra_env)
+    return env
 
 
 @dataclass
@@ -66,11 +118,13 @@ def _build_options(
         model=model,
         max_turns=max_turns,
         setting_sources=[],  # hermetic: do not load host settings/CLAUDE.md
+        # Always set explicitly -- never leave unset -- so the subprocess never
+        # falls back to the SDK's full-environment-inheritance default. See
+        # `_subprocess_env` / `_ENV_ALLOWLIST` above.
+        env=_subprocess_env(extra_env),
     )
     if max_cost_usd is not None:
         kwargs["max_budget_usd"] = max_cost_usd
-    if extra_env:
-        kwargs["env"] = extra_env  # e.g. OpenRouter base URL + auth token
     return ClaudeAgentOptions(**kwargs)
 
 

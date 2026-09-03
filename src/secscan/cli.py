@@ -176,14 +176,12 @@ def _run_config(
     limit: int | None,
     db_url: str | None = None,
     db_user: str | None = None,
-    db_password: str | None = None,
     db_ssl: bool = False,
     no_db: bool = False,
     create_issues: bool = False,
     push_to_secman: bool = False,
     secman_url: str | None = None,
     secman_username: str | None = None,
-    secman_password: str | None = None,
     dry_run: bool = False,
     issue_prefix: str = "secscan:",
     provider: str = "auto",
@@ -216,8 +214,10 @@ def _run_config(
     if push_to_secman:
         from .secman_push import resolve_credentials
 
+        # No --secman-password flag exists (argv/ps exposure) — password comes from
+        # SECMAN_PASSWORD only.
         secman_url, secman_username, secman_password = resolve_credentials(
-            secman_url, secman_username, secman_password
+            secman_url, secman_username, None
         )
         # A dry run never logs in or posts, so it needs no credentials. Otherwise fail
         # here, before an expensive review runs against an unconfigured push.
@@ -229,7 +229,9 @@ def _run_config(
         github_api_url=github_api_url,
         db_url=db_url,
         db_user=db_user,
-        db_password=db_password,
+        # No --db-password flag exists (argv/ps exposure) — password comes from
+        # DB_PASSWORD only.
+        db_password=_resolve_db_password(None),
         db_ssl=db_ssl,
         no_db=no_db,
         create_issues=create_issues,
@@ -956,6 +958,8 @@ def push_to_secman(
 
     dry_run = _enter_dry_run(dry_run)
 
+    # No --secman-password flag exists (argv/ps exposure) — password comes from
+    # SECMAN_PASSWORD only.
     url, username, password = secman_push.resolve_credentials(
         secman_url, secman_username, None
     )
