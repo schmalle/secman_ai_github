@@ -44,6 +44,8 @@ def test_review_db_flags_reach_config(tmp_path, monkeypatch):
     """--db-password does not exist: DB_PASSWORD (env) is the only way to supply it,
     so it can never land in argv/`ps`/shell history. --db-user is a plain identifier,
     not a secret, so it stays a flag."""
+    # DB_PASSWORD is env-only by design (no --db-password flag, to keep it out of
+    # `ps`/`/proc/<pid>/cmdline`) — every other DB setting still comes from a flag.
     monkeypatch.setenv("DB_PASSWORD", "pw")
     captured = {}
     _capture_review_local(monkeypatch, captured)

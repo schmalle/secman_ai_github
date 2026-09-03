@@ -186,14 +186,12 @@ def _run_config(
     limit: int | None,
     db_url: str | None = None,
     db_user: str | None = None,
-    db_password: str | None = None,
     db_ssl: bool = False,
     no_db: bool = False,
     create_issues: bool = False,
     push_to_secman: bool = False,
     secman_url: str | None = None,
     secman_username: str | None = None,
-    secman_password: str | None = None,
     dry_run: bool = False,
     issue_prefix: str = "secscan:",
     provider: str = "auto",
@@ -219,11 +217,16 @@ def _run_config(
     # SECMAN_* in the environment is not, since it is often exported process-wide.
     if not push_to_secman and (secman_url or secman_username or secman_password):
         raise ConfigError("--secman-url/--secman-username (or SECMAN_PASSWORD) require --push-to-secman")
+    if not push_to_secman and (secman_url or secman_username):
+        raise ConfigError("--secman-url/--secman-username require --push-to-secman")
+    secman_password: str | None = None
     if push_to_secman:
         from .secman_push import resolve_credentials
 
+        # No --secman-password flag exists (argv/ps exposure) — password comes from
+        # SECMAN_PASSWORD only.
         secman_url, secman_username, secman_password = resolve_credentials(
-            secman_url, secman_username, secman_password
+            secman_url, secman_username, None
         )
         # A dry run never logs in or posts, so it needs no credentials. Otherwise fail
         # here, before an expensive review runs against an unconfigured push.
@@ -235,7 +238,9 @@ def _run_config(
         github_api_url=github_api_url,
         db_url=db_url,
         db_user=db_user,
-        db_password=db_password,
+        # No --db-password flag exists (argv/ps exposure) — password comes from
+        # DB_PASSWORD only.
+        db_password=_resolve_db_password(None),
         db_ssl=db_ssl,
         no_db=no_db,
         create_issues=create_issues,
@@ -293,6 +298,7 @@ def run(
     github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (mysql://user:pass@host:3306/db). Defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
@@ -354,6 +360,10 @@ def run(
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
             secman_username=secman_username, secman_password=None,
+            db_url=_resolve_db_url(db_url), db_user=db_user, db_ssl=db_ssl,
+            no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
+            push_to_secman=push_to_secman, secman_url=secman_url,
+            secman_username=secman_username,
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -382,6 +392,7 @@ def list_repos(
     github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Print only; do not record the last commit in the state DB."),
 ) -> None:
@@ -502,6 +513,7 @@ def list_users(
     output_dir: Path = typer.Option(Path("output"), help="Where users.csv and the state DB live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Print only; do not record the users in the state DB."),
 ) -> None:
@@ -598,6 +610,7 @@ def review(
     ),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (with --store-db); defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     model: str = typer.Option("sonnet", help=_MODEL_HELP),
     provider: str = typer.Option("auto", help=_PROVIDER_HELP),
@@ -619,6 +632,7 @@ def review(
         # DB_PASSWORD env var only — no --db-password flag, so the secret never lands
         # in argv/`ps`/shell history (see the same rationale on run/scan below).
         db_password=_resolve_db_password(None), db_ssl=_resolve_db_ssl(db_ssl),
+        db_ssl=_resolve_db_ssl(db_ssl),
         no_db=not store_db,
         provider=provider, timeout_s=timeout,
     )
@@ -632,6 +646,7 @@ def scan(
     github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
     no_db: bool = typer.Option(False, "--no-db", help="Skip all DB storage; findings.csv is still written, summary.csv is skipped. Cannot combine with --create-issues."),
     create_issues: bool = typer.Option(False, "--create-issues", help="Open one GitHub issue per new High/Critical finding (deduped by content fingerprint). Requires the DB — cannot combine with --no-db."),
@@ -684,6 +699,10 @@ def scan(
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
             secman_username=secman_username, secman_password=None,
+            db_url=_resolve_db_url(db_url), db_user=db_user, db_ssl=db_ssl,
+            no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
+            push_to_secman=push_to_secman, secman_url=secman_url,
+            secman_username=secman_username,
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -702,6 +721,7 @@ def report(
     output_dir: Path = typer.Option(Path("output"), help="Where state and CSVs live."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Rebuild summary.csv from the state database."""
@@ -820,6 +840,7 @@ def stats(
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Print scan statistics from the state database (repos, findings by severity, cost)."""
@@ -883,6 +904,7 @@ def stats_reset(
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Delete all stored statistics (scan history and findings) from the state database.
@@ -927,6 +949,7 @@ def send_report(
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url. Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
 ) -> None:
     """Email the latest scan results as an HTML report (with a plain-text part)."""
@@ -964,6 +987,7 @@ def push_to_secman(
     output_dir: Path = typer.Option(Path("output"), help="Where the state DB lives."),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). The password has no CLI flag — set DB_PASSWORD (env) only, so it never lands in argv/`ps`."),
+    db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Password: DB_PASSWORD env only (no --db-password flag, to avoid exposing it via `ps`)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env)."),
 ) -> None:
     """Push High/Critical findings from the state DB into secman via cli-add.
@@ -978,6 +1002,8 @@ def push_to_secman(
 
     # SECMAN_PASSWORD env var only — no --secman-password flag, so an ADMIN/VULN-role
     # secman credential never lands in argv/`ps`/shell history/a CI job log (see run/scan).
+    # No --secman-password flag exists (argv/ps exposure) — password comes from
+    # SECMAN_PASSWORD only.
     url, username, password = secman_push.resolve_credentials(
         secman_url, secman_username, None
     )

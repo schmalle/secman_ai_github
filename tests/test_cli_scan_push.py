@@ -32,10 +32,8 @@ def _capture_scan_repo(monkeypatch, captured, started):
 
 
 def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
-    """--secman-password does not exist: SECMAN_PASSWORD (env) is the only way to
-    supply it, so an ADMIN/VULN-role secman credential can never land in argv/`ps`/
-    shell history/a CI log. --secman-url/--secman-username are plain identifiers,
-    not secrets, so they stay flags."""
+    # SECMAN_PASSWORD is env-only by design (no --secman-password flag, to keep it
+    # out of `ps`/`/proc/<pid>/cmdline`) — url/username still come from flags.
     _no_secman_env(monkeypatch)
     monkeypatch.setenv("SECMAN_PASSWORD", "pw")
     captured, started = {}, []
