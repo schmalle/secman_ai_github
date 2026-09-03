@@ -32,8 +32,8 @@ def _capture_scan_repo(monkeypatch, captured, started):
 
 
 def test_scan_push_flags_reach_config(tmp_path, monkeypatch):
-    # SECMAN_PASSWORD is env-only by design (no --secman-password flag, to keep it
-    # out of `ps`/`/proc/<pid>/cmdline`) — url/username still come from flags.
+    # --secman-password does not exist as a CLI flag (it would leak into argv/ps);
+    # the password is SECMAN_PASSWORD-env-only, same as --db-password/DB_PASSWORD.
     _no_secman_env(monkeypatch)
     monkeypatch.setenv("SECMAN_PASSWORD", "pw")
     captured, started = {}, []
@@ -74,6 +74,24 @@ def test_run_push_flags_reach_config(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["cfg"].push_to_secman is True
     assert captured["cfg"].secman_url == "https://secman.example.com"
+    assert captured["cfg"].secman_password == "pw"
+
+
+def test_secman_password_flag_does_not_exist(tmp_path, monkeypatch):
+    """Regression test: a value-taking --secman-password flag would leak the
+    secman password into argv (visible via `ps`/`/proc/<pid>/cmdline` to any
+    other local process for the life of the CLI run). SECMAN_PASSWORD is
+    env-only."""
+    _no_secman_env(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["scan", "octo/demo", "--output-dir", str(tmp_path), "--push-to-secman",
+         "--secman-password", "pw"],
+    )
+
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()
 
 
 def test_scan_push_credentials_come_from_env(tmp_path, monkeypatch):
