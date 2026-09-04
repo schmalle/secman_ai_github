@@ -24,6 +24,11 @@ Enterprise Cloud with data residency, or Enterprise Server.
 `--skill` (repeatable, on run / scan / review) appends operator-chosen security
 skill packs — bundled names or paths to Agent-Skills-format directories — to the
 reviewer's system prompt. See skills.py and docs/SECURITY_SKILLS.md.
+
+`--engine` (on run / scan / review, or SECSCAN_ENGINE) picks the reviewer: `claude`
+(default; Claude Code via the Agent SDK, routed by --provider/--model) or
+`codescanai` (the CodeScanAI CLI driven as a subprocess, configured by the
+--codescanai-* flags / CODESCANAI_* env). See codescanai.py.
 """
 
 from __future__ import annotations
@@ -50,7 +55,46 @@ _PROVIDER_HELP = (
 _MODEL_HELP = (
     "Model for reviews; the default alias maps per provider (OpenRouter: a slug like "
     "anthropic/claude-sonnet-4.5; Kimi: an ID like kimi-k2.7-code; Copilot: an ID like "
-    "claude-sonnet-4.5 or gpt-4.1)."
+    "claude-sonnet-4.5 or gpt-4.1). With --engine codescanai it is CodeScanAI's model "
+    "(gpt-4o, gemini-1.5-flash, llama3, …); left at the default alias, CodeScanAI's own "
+    "per-provider default (or CODESCANAI_MODEL) is used."
+)
+
+_ENGINE_HELP = (
+    "Which reviewer does the work (or SECSCAN_ENGINE env): claude — Claude Code via the "
+    "Agent SDK (default; --provider/--model/--skill apply) — or codescanai — the "
+    "CodeScanAI CLI (pip install codescanai) run as a subprocess over the same clone, "
+    "configured with --codescanai-* / CODESCANAI_*. Findings from either engine flow "
+    "into the same CSV, state DB, issues, secman push and email report."
+)
+_CODESCANAI_PROVIDER_HELP = (
+    "CodeScanAI's AI provider (or CODESCANAI_PROVIDER env): openai (OPENAI_API_KEY), "
+    "gemini (GEMINI_API_KEY), custom (an OpenAI-compatible server such as Ollama, via "
+    "--codescanai-host), or auto (default: openai if OPENAI_API_KEY is set, else gemini "
+    "if GEMINI_API_KEY is set; custom is never auto-selected)."
+)
+_CODESCANAI_HOST_HELP = (
+    "Custom server URL for --codescanai-provider custom, e.g. http://localhost "
+    "(or CODESCANAI_HOST env). Handed to CodeScanAI as OPENAI_BASE_URL together with "
+    "--codescanai-port/--codescanai-endpoint, never on its command line."
+)
+_CODESCANAI_PORT_HELP = "Custom server port, e.g. 11434 for Ollama (or CODESCANAI_PORT env)."
+_CODESCANAI_ENDPOINT_HELP = (
+    "Custom server API path appended to host:port, e.g. /v1 for Ollama "
+    "(or CODESCANAI_ENDPOINT env). Unset means the server root."
+)
+_CODESCANAI_BIN_HELP = (
+    "How to invoke CodeScanAI (or CODESCANAI_BIN env); default `codescanai`. A path, or "
+    "a full command line such as 'python3 -m core.runner_v2' or 'uvx codescanai'."
+)
+_CODESCANAI_ARG_HELP = (
+    "Extra argument passed to the codescanai command line verbatim (repeatable), e.g. "
+    "--codescanai-arg=--changes_only. Never put a token here — set CODESCANAI_TOKEN."
+)
+_CODESCANAI_DEFAULT_SEVERITY_HELP = (
+    "Severity assigned to a CodeScanAI finding whose free-text severity cannot be "
+    "mapped to critical/high/medium/low/info (or CODESCANAI_DEFAULT_SEVERITY env); "
+    "default medium, i.e. such findings are counted but not reported as High/Critical."
 )
 
 
@@ -212,6 +256,14 @@ def _run_config(
     email_subject: str | None = None,
     github_api_url: str | None = None,
     skills: list[str] | None = None,
+    engine: str | None = None,
+    codescanai_provider: str | None = None,
+    codescanai_host: str | None = None,
+    codescanai_port: int | None = None,
+    codescanai_endpoint: str | None = None,
+    codescanai_bin: str | None = None,
+    codescanai_args: list[str] | None = None,
+    codescanai_default_severity: str | None = None,
 ) -> RunConfig:
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
@@ -230,6 +282,7 @@ def _run_config(
     # process-wide.
     if not push_to_secman and (secman_url or secman_username):
         raise ConfigError("--secman-url/--secman-username require --push-to-secman")
+    secman_password: str | None = None
     if push_to_secman:
         from .secman_push import resolve_credentials
 
@@ -243,6 +296,19 @@ def _run_config(
         if not dry_run and not (secman_url and secman_username and secman_password):
             raise ConfigError(_SECMAN_CREDS_MISSING)
     loaded_skills = _load_skills(skills)
+    engine, codescanai_cfg = _resolve_engine(
+        engine,
+        provider=provider,
+        skills=loaded_skills,
+        codescanai_provider=codescanai_provider,
+        codescanai_host=codescanai_host,
+        codescanai_port=codescanai_port,
+        codescanai_endpoint=codescanai_endpoint,
+        codescanai_bin=codescanai_bin,
+        codescanai_args=codescanai_args,
+        codescanai_default_severity=codescanai_default_severity,
+        model=model,
+    )
     return RunConfig(
         output_dir=output_dir,
         state_db=output_dir / "secscan.sqlite3",
@@ -267,6 +333,8 @@ def _run_config(
             max_size_mb=max_size_mb,
         ),
         concurrency=concurrency,
+        engine=engine,
+        codescanai=codescanai_cfg,
         model=model,
         provider=provider,
         max_turns=max_turns,
@@ -295,6 +363,77 @@ def _load_skills(refs: list[str] | None) -> list:
         return load_skills(refs)
     except SkillError as exc:
         raise ConfigError(f"--skill: {exc}") from exc
+
+
+_ENGINES = ("claude", "codescanai")
+
+
+def _resolve_engine(
+    engine: str | None,
+    *,
+    provider: str,
+    skills: list,
+    codescanai_provider: str | None,
+    codescanai_host: str | None,
+    codescanai_port: int | None,
+    codescanai_endpoint: str | None,
+    codescanai_bin: str | None,
+    codescanai_args: list[str] | None,
+    codescanai_default_severity: str | None,
+    model: str,
+):
+    """Resolve --engine (flag, then SECSCAN_ENGINE, then claude) and its settings.
+
+    CodeScanAI settings are resolved up front — API key present, binary installed,
+    host well-formed — so a misconfigured engine fails before any clone or review.
+    Flags that only make sense for the other engine are configuration errors rather
+    than silently ignored; `CODESCANAI_*` environment variables are not, since they
+    are often exported process-wide.
+    """
+    import os
+
+    engine = (engine or os.environ.get("SECSCAN_ENGINE") or "claude").strip().lower()
+    if engine not in _ENGINES:
+        raise ConfigError(f"--engine must be one of {', '.join(_ENGINES)}; got {engine!r}")
+
+    codescanai_flags = {
+        "--codescanai-provider": codescanai_provider,
+        "--codescanai-host": codescanai_host,
+        "--codescanai-port": codescanai_port,
+        "--codescanai-endpoint": codescanai_endpoint,
+        "--codescanai-bin": codescanai_bin,
+        "--codescanai-arg": codescanai_args or None,
+        "--codescanai-default-severity": codescanai_default_severity,
+    }
+    given = [flag for flag, value in codescanai_flags.items() if value not in (None, "")]
+
+    if engine != "codescanai":
+        if given:
+            raise ConfigError(f"{', '.join(given)} require --engine codescanai")
+        return engine, None
+
+    if skills:
+        raise ConfigError(
+            "--skill only applies to --engine claude: CodeScanAI's review prompt is not "
+            "configurable, so a skill pack cannot be added to it"
+        )
+    if provider != "auto":
+        raise ConfigError(
+            "--provider selects the endpoint for the Claude Code reviewer and does not "
+            "apply to --engine codescanai; use --codescanai-provider instead"
+        )
+    from .codescanai import resolve_config
+
+    return engine, resolve_config(
+        provider=codescanai_provider,
+        model=model,
+        host=codescanai_host,
+        port=codescanai_port,
+        endpoint=codescanai_endpoint,
+        bin=codescanai_bin,
+        extra_args=codescanai_args,
+        default_severity=codescanai_default_severity,
+    )
 
 
 def _validate_email_config(cfg: RunConfig) -> None:
@@ -366,6 +505,14 @@ def run(
     smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
     subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
     skill: list[str] = typer.Option(None, "--skill", help=_SKILL_HELP),
+    engine: str = typer.Option(None, "--engine", help=_ENGINE_HELP),
+    codescanai_provider: str = typer.Option(None, "--codescanai-provider", help=_CODESCANAI_PROVIDER_HELP),
+    codescanai_host: str = typer.Option(None, "--codescanai-host", help=_CODESCANAI_HOST_HELP),
+    codescanai_port: int = typer.Option(None, "--codescanai-port", help=_CODESCANAI_PORT_HELP),
+    codescanai_endpoint: str = typer.Option(None, "--codescanai-endpoint", help=_CODESCANAI_ENDPOINT_HELP),
+    codescanai_bin: str = typer.Option(None, "--codescanai-bin", help=_CODESCANAI_BIN_HELP),
+    codescanai_arg: list[str] = typer.Option(None, "--codescanai-arg", help=_CODESCANAI_ARG_HELP),
+    codescanai_default_severity: str = typer.Option(None, "--codescanai-default-severity", help=_CODESCANAI_DEFAULT_SEVERITY_HELP),
 ) -> None:
     """Enumerate, clone, and security-review reachable repositories."""
     import asyncio
@@ -376,8 +523,7 @@ def run(
         cfg = _run_config(
             output_dir, concurrency, model, max_turns, max_cost_usd,
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
-            db_url=_resolve_db_url(db_url), db_user=db_user, db_password=_resolve_db_password(None),
-            db_ssl=db_ssl,
+            db_url=_resolve_db_url(db_url), db_user=db_user, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
             secman_username=secman_username,
@@ -386,6 +532,11 @@ def run(
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
             github_api_url=github_api_url, skills=skill,
+            engine=engine, codescanai_provider=codescanai_provider,
+            codescanai_host=codescanai_host, codescanai_port=codescanai_port,
+            codescanai_endpoint=codescanai_endpoint, codescanai_bin=codescanai_bin,
+            codescanai_args=codescanai_arg,
+            codescanai_default_severity=codescanai_default_severity,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:
@@ -633,20 +784,37 @@ def review(
         900.0, help="Abort if the agent stalls (no output) this long, in seconds; 0 disables."
     ),
     skill: list[str] = typer.Option(None, "--skill", help=_SKILL_HELP),
+    engine: str = typer.Option(None, "--engine", help=_ENGINE_HELP),
+    codescanai_provider: str = typer.Option(None, "--codescanai-provider", help=_CODESCANAI_PROVIDER_HELP),
+    codescanai_host: str = typer.Option(None, "--codescanai-host", help=_CODESCANAI_HOST_HELP),
+    codescanai_port: int = typer.Option(None, "--codescanai-port", help=_CODESCANAI_PORT_HELP),
+    codescanai_endpoint: str = typer.Option(None, "--codescanai-endpoint", help=_CODESCANAI_ENDPOINT_HELP),
+    codescanai_bin: str = typer.Option(None, "--codescanai-bin", help=_CODESCANAI_BIN_HELP),
+    codescanai_arg: list[str] = typer.Option(None, "--codescanai-arg", help=_CODESCANAI_ARG_HELP),
+    codescanai_default_severity: str = typer.Option(None, "--codescanai-default-severity", help=_CODESCANAI_DEFAULT_SEVERITY_HELP),
 ) -> None:
     """Security-review a single local repository directory."""
     import asyncio
 
     from .orchestrator import review_local
 
-    cfg = _run_config(
-        output_dir, 1, model, max_turns, max_cost_usd,
-        False, False, 0, True, True, None,
-        db_url=_resolve_db_url(db_url), db_user=_resolve_db_user(db_user),
-        db_password=_resolve_db_password(None), db_ssl=_resolve_db_ssl(db_ssl),
-        no_db=not store_db,
-        provider=provider, timeout_s=timeout,
-    )
+    try:
+        cfg = _run_config(
+            output_dir, 1, model, max_turns, max_cost_usd,
+            False, False, 0, True, True, None,
+            db_url=_resolve_db_url(db_url), db_user=_resolve_db_user(db_user),
+            db_ssl=_resolve_db_ssl(db_ssl),
+            no_db=not store_db,
+            provider=provider, timeout_s=timeout, skills=skill,
+            engine=engine, codescanai_provider=codescanai_provider,
+            codescanai_host=codescanai_host, codescanai_port=codescanai_port,
+            codescanai_endpoint=codescanai_endpoint, codescanai_bin=codescanai_bin,
+            codescanai_args=codescanai_arg,
+            codescanai_default_severity=codescanai_default_severity,
+        )
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
     asyncio.run(review_local(cfg, path))
 
 
@@ -690,9 +858,17 @@ def scan(
     smtp_port: int = typer.Option(None, help="SMTP port; defaults to SMTP_PORT, preset, or 587."),
     subject: str = typer.Option(None, help="Email subject; defaults to a findings summary."),
     skill: list[str] = typer.Option(None, "--skill", help=_SKILL_HELP),
+    engine: str = typer.Option(None, "--engine", help=_ENGINE_HELP),
+    codescanai_provider: str = typer.Option(None, "--codescanai-provider", help=_CODESCANAI_PROVIDER_HELP),
+    codescanai_host: str = typer.Option(None, "--codescanai-host", help=_CODESCANAI_HOST_HELP),
+    codescanai_port: int = typer.Option(None, "--codescanai-port", help=_CODESCANAI_PORT_HELP),
+    codescanai_endpoint: str = typer.Option(None, "--codescanai-endpoint", help=_CODESCANAI_ENDPOINT_HELP),
+    codescanai_bin: str = typer.Option(None, "--codescanai-bin", help=_CODESCANAI_BIN_HELP),
+    codescanai_arg: list[str] = typer.Option(None, "--codescanai-arg", help=_CODESCANAI_ARG_HELP),
+    codescanai_default_severity: str = typer.Option(None, "--codescanai-default-severity", help=_CODESCANAI_DEFAULT_SEVERITY_HELP),
 ) -> None:
-    """Clone one remote repository and security-review it (requires a PAT — single-repo
-    scans don't enumerate App installations, so App-only credentials can't clone here)."""
+    """Clone one remote repository and security-review it. Locates the App installation
+    owning the repo (falling back to the PAT when the App is not installed there)."""
     import asyncio
 
     from .orchestrator import scan_repo
@@ -702,8 +878,7 @@ def scan(
         cfg = _run_config(
             output_dir, 1, model, max_turns, max_cost_usd,
             False, False, 0, keep_clones, False, None,
-            db_url=_resolve_db_url(db_url), db_user=db_user, db_password=_resolve_db_password(None),
-            db_ssl=db_ssl,
+            db_url=_resolve_db_url(db_url), db_user=db_user, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
             secman_username=secman_username,
@@ -712,6 +887,11 @@ def scan(
             email_to=email_to, email_provider=email_provider,
             smtp_host=smtp_host, smtp_port=smtp_port, email_subject=subject,
             github_api_url=github_api_url, skills=skill,
+            engine=engine, codescanai_provider=codescanai_provider,
+            codescanai_host=codescanai_host, codescanai_port=codescanai_port,
+            codescanai_endpoint=codescanai_endpoint, codescanai_bin=codescanai_bin,
+            codescanai_args=codescanai_arg,
+            codescanai_default_severity=codescanai_default_severity,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:

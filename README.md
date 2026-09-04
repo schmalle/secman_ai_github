@@ -7,6 +7,11 @@ A command-line tool that enumerates **all reachable repositories** of a GitHub A
 Findings and state also live in a database (SQLite by default, MySQL/MariaDB
 optionally), and results can be emailed as an HTML report.
 
+The review step is pluggable: the default engine is Claude Code, and
+[CodeScanAI](https://github.com/codescan-ai/codescan) (OpenAI, Gemini, or any
+OpenAI-compatible server such as Ollama) can be selected with `--engine codescanai`
+— see [Review engines](#review-engines---engine).
+
 ## How it works
 
 ```
@@ -21,6 +26,10 @@ The review agent runs with **read-only tools only** (`Read`, `Grep`, `Glob`) —
 Bash, no network — so untrusted repository code is never executed. Repo contents are
 treated as untrusted data (prompt-injection aware).
 
+With `--engine codescanai` the "Claude read-only security review" box is replaced by a
+CodeScanAI subprocess over the same clone; everything before and after it (enumeration,
+cloning, CSV, state, issues, secman, email) is unchanged.
+
 ## Prerequisites
 
 - Python 3.10+ (this repo pins 3.12 via `uv`).
@@ -28,7 +37,10 @@ treated as untrusted data (prompt-injection aware).
 - Node + the Claude Code CLI installed and authenticated. The Claude Agent SDK shells
   out to it. Auth via `ANTHROPIC_API_KEY`, a logged-in Claude subscription, **or** an
   `OPENROUTER_API_KEY`, a Moonshot/Kimi key, or a local GitHub Copilot bridge (see
-  [Choosing a provider](#choosing-a-provider---provider)).
+  [Choosing a provider](#choosing-a-provider---provider)). Not needed with
+  `--engine codescanai`, which instead needs the `codescanai` CLI
+  (`pip install codescanai`) and an OpenAI/Gemini key or a self-hosted server — see
+  [Review engines](#review-engines---engine).
 - GitHub credentials. A **GitHub App** is the primary credential; a PAT is an
   optional fallback. Either works alone.
   - **GitHub App** — installed on the target org(s)/repos with permissions
@@ -81,6 +93,15 @@ the environment only and never written to disk.
 | `COPILOT_BASE_URL` | Anthropic-compatible GitHub Copilot bridge for `--provider copilot` (default `http://localhost:4141`) |
 | `COPILOT_API_KEY` | Token for that bridge, if it requires one (`GITHUB_COPILOT_API_KEY` works too) |
 | `COPILOT_MODEL` | Copilot model the default `--model` alias resolves to (default `claude-sonnet-4.5`) |
+| `SECSCAN_ENGINE` | Review engine (or `--engine`): `claude` (default) or `codescanai`. See [Review engines](#review-engines---engine) |
+| `OPENAI_API_KEY` | OpenAI key for `--engine codescanai` (`--codescanai-provider openai`, auto-selected when set); `OPENAI_BASE_URL` points it at an OpenAI-compatible gateway |
+| `GEMINI_API_KEY` | Google Gemini key for `--engine codescanai` (`--codescanai-provider gemini`; `GOOGLE_API_KEY` works too) |
+| `CODESCANAI_PROVIDER` | CodeScanAI provider (or `--codescanai-provider`): `auto`, `openai`, `gemini`, `custom` |
+| `CODESCANAI_MODEL` | Model CodeScanAI uses when `--model` is left at its default alias (else CodeScanAI's own per-provider default) |
+| `CODESCANAI_HOST` / `CODESCANAI_PORT` / `CODESCANAI_ENDPOINT` | Self-hosted OpenAI-compatible server for `--codescanai-provider custom` (or the `--codescanai-*` flags), e.g. `http://localhost` / `11434` / `/v1` for Ollama |
+| `CODESCANAI_TOKEN` | Bearer token for that custom server. No `--codescanai-token` flag — env only, so the token never reaches argv/`ps` |
+| `CODESCANAI_BIN` | How to invoke CodeScanAI (or `--codescanai-bin`); default `codescanai`, may be a full command line |
+| `CODESCANAI_DEFAULT_SEVERITY` | Severity for a CodeScanAI finding whose free-text severity can't be mapped (or `--codescanai-default-severity`); default `medium` |
 | `SECSCAN_DB_URL` | `mysql://user:pass@host:3306/secscan` for state + findings + targets; unset = local SQLite |
 | `DB_USERNAME` | MySQL/MariaDB username (or `--db-user`); overrides any user embedded in `SECSCAN_DB_URL` |
 | `DB_PASSWORD` | MySQL/MariaDB password; overrides any password embedded in `SECSCAN_DB_URL`. No `--db-password` flag — env only, so the password never reaches argv/`ps` |
@@ -128,12 +149,18 @@ uv run secscan push-to-secman --dry-run                    # preview only
 uv run secscan scan octo/webapp --push-to-secman           # review and push, in one step
 uv run secscan run --targets-only --push-to-secman         # same for a whole run
 uv run secscan run --dry-run                               # no issues opened, nothing pushed to secman
+uv run secscan scan octo/webapp --engine codescanai        # review with CodeScanAI (OpenAI key in OPENAI_API_KEY)
+uv run secscan review ./repo --engine codescanai --codescanai-provider custom \
+    --codescanai-host http://localhost --codescanai-port 11434 --codescanai-endpoint /v1 --model llama3   # local Ollama
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---model --provider --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-ssl --no-db --store-db --create-issues --push-to-secman --secman-url --secman-username --dry-run --issue-prefix --keep-clones
+--engine --model --provider --skill --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-ssl --no-db --store-db --create-issues --push-to-secman --secman-url --secman-username --dry-run --issue-prefix --keep-clones
 --branch --no-resume --limit --targets-only --repos-file --github-api-url --org-repos
---format --output --no-csv`. (`DB_PASSWORD`/`SECMAN_PASSWORD` are env-only — there is no `--db-password`/`--secman-password` flag.)
+--format --output --no-csv --codescanai-provider --codescanai-host --codescanai-port
+--codescanai-endpoint --codescanai-bin --codescanai-arg --codescanai-default-severity`.
+(`DB_PASSWORD`/`SECMAN_PASSWORD`/`CODESCANAI_TOKEN` are env-only — there is no
+`--db-password`/`--secman-password`/`--codescanai-token` flag.)
 
 `list-repos` prints one tab-separated line per repo: `owner/name`, size in KB, then the
 latest commit on the branch GitHub reports as HEAD — short SHA and `YYYY-MM-DD` date, or
@@ -510,10 +537,129 @@ export DB_PASSWORD=<the password you entered>
 export DB_SSL=true   # only if --ssl was passed
 ```
 
+## Review engines (`--engine`)
+
+`--engine` (on `run`, `scan`, and `review`; or `SECSCAN_ENGINE`) selects what performs
+the review step. Everything around it — enumeration, cloning, `findings.csv`, the
+state DB, `--create-issues`, `--push-to-secman`, `--email-to`, `stats`, `report` —
+is engine-agnostic and behaves identically.
+
+| `--engine` | Reviewer | Configured by |
+|---|---|---|
+| `claude` (default) | Claude Code via the Claude Agent SDK: an autonomous, read-only agent that explores the repository with `Read`/`Grep`/`Glob` and emits secscan's JSON findings contract | `--provider`, `--model`, `--skill`, `--max-turns`, `--max-cost-usd` — see [Choosing a provider](#choosing-a-provider---provider) |
+| `codescanai` | [CodeScanAI](https://github.com/codescan-ai/codescan): an open-source CLI that sends each file to an LLM (OpenAI, Gemini, or an OpenAI-compatible server) one at a time and reports the vulnerabilities it finds | `--codescanai-provider`, `--model`, `--codescanai-host/-port/-endpoint`, `--codescanai-bin`, `--codescanai-arg`, `--codescanai-default-severity`, and the `CODESCANAI_*` environment variables |
+
+Flags that belong to the other engine are configuration errors rather than silently
+ignored (`--skill` or a non-default `--provider` with `codescanai`; any
+`--codescanai-*` flag with `claude`). `CODESCANAI_*` environment variables are never
+an error, so they can be exported process-wide.
+
+### Using CodeScanAI
+
+```bash
+pip install codescanai            # or: uv tool install codescanai — needs Python 3.10+
+export OPENAI_API_KEY=sk-…        # or GEMINI_API_KEY=…
+uv run secscan scan octo/webapp --engine codescanai
+uv run secscan run --org my-org --engine codescanai --model gpt-4o --create-issues
+uv run secscan review ./repo --engine codescanai --codescanai-provider gemini
+```
+
+secscan runs the `codescanai` command as a subprocess over the clone (with
+`.git/` left out, since CodeScanAI walks every file and each text file is one model
+call), reads its per-file report, and maps each reported vulnerability onto a
+secscan finding:
+
+| CodeScanAI | secscan finding |
+|---|---|
+| file header (`--- Vulnerabilities found in path ---`) | `file_path` |
+| `Line N` | `line_range` |
+| `[severity]` (free text chosen by the model) | `severity` — exact rubric values and common synonyms (`moderate`, `severe`, `informational`, …) are mapped; anything else becomes `--codescanai-default-severity` (default `medium`) |
+| vulnerability type | `title` and `category` |
+| `Issue` / `Fix` | `description` / `recommendation` |
+
+`confidence` is always `medium`, `cost_usd` is always `0` (CodeScanAI does not report
+spend — watch your provider's dashboard), and the "turns" of a review are the number
+of files scanned. The raw report is kept verbatim as
+`<output-dir>/<owner>__<repo>/codescanai-report.md` next to `findings.csv`. If a
+custom server or a future CodeScanAI build prints secscan's own
+`{"findings": [...]}` JSON contract instead of the Markdown blocks, that is accepted
+too.
+
+**Provider and model.** `--codescanai-provider` (or `CODESCANAI_PROVIDER`) is `auto`
+by default: `openai` if `OPENAI_API_KEY` is set, else `gemini` if `GEMINI_API_KEY`
+(or `GOOGLE_API_KEY`) is set; `custom` is never auto-selected. `--model` is passed to
+CodeScanAI as-is (`gpt-4o`, `gemini-1.5-flash`, `llama3`, …); left at secscan's
+default alias, CodeScanAI's own per-provider default applies (`gpt-4o-mini` for
+OpenAI), and `CODESCANAI_MODEL` changes that without passing `--model` everywhere.
+`OPENAI_BASE_URL` is forwarded, so the `openai` provider also works against any
+OpenAI-compatible gateway. The reviewer's `--provider` (Claude routing) does not apply
+here, and neither do `--skill`, `--max-turns` or `--max-cost-usd`.
+
+**Self-hosted servers (`custom`).** Point CodeScanAI at any OpenAI-compatible server —
+Ollama, vLLM, LM Studio, a corporate gateway:
+
+```bash
+export CODESCANAI_TOKEN=…         # only if the server authenticates; optional for Ollama
+uv run secscan scan octo/webapp --engine codescanai --codescanai-provider custom \
+    --codescanai-host http://localhost --codescanai-port 11434 --codescanai-endpoint /v1 \
+    --model llama3
+```
+
+The URL is assembled the way CodeScanAI's own `--host`/`--port`/`--endpoint` assemble
+it (`host[:port][endpoint]`, so `http://localhost:11434/v1` above) — but it is handed
+to CodeScanAI through the `OPENAI_BASE_URL` / `OPENAI_API_KEY` environment variables
+its OpenAI-compatible client reads, never on its command line. CodeScanAI's own
+`--token` flag would put the bearer token into the subprocess's argv, visible to every
+local process via `ps`, which is why there is deliberately no `--codescanai-token`
+flag: `CODESCANAI_TOKEN` is env-only, exactly like `DB_PASSWORD` and
+`SECMAN_PASSWORD`. Without a token, the same placeholder CodeScanAI itself uses is
+sent, so a real `OPENAI_API_KEY` from your shell never reaches a custom server. The
+same `custom` route is the workaround for Gemini when CodeScanAI's `gemini` provider
+is out of step with its `pydantic-ai` dependency (CodeScanAI 0.1.4 fails with
+"Unknown model: gemini:…" on current pydantic-ai): use Gemini's OpenAI-compatible
+endpoint, `--codescanai-host https://generativelanguage.googleapis.com
+--codescanai-endpoint /v1beta/openai --model gemini-2.5-flash` with
+`CODESCANAI_TOKEN` set to the Gemini key.
+
+**How it is invoked.** `--codescanai-bin` (or `CODESCANAI_BIN`, default `codescanai`)
+may be a path or a whole command line — `'python3 -m core.runner_v2'` for a source
+checkout, `'uvx codescanai'` for an on-demand install. `--codescanai-arg` (repeatable)
+appends anything else verbatim, e.g. `--codescanai-arg=--changes_only`, so options
+added by future CodeScanAI releases are usable without waiting for secscan. The
+executable, the API key for the chosen provider, and the host for `custom` are all
+checked before anything is cloned, so a misconfigured engine fails fast.
+
+**Isolation.** The subprocess gets a minimal environment: `PATH`/`HOME`, locale, proxy
+and CA-bundle variables, plus only the credential of the provider in use. Your GitHub
+App key, PAT, and DB/secman/SMTP passwords never reach a process that ships file
+contents to a third-party API. Note what that means: unlike the Claude engine, which
+reads files locally through a tool-restricted agent, CodeScanAI **uploads every text
+file in the repository** (minus `.git/`) to OpenAI, Google, or your custom server —
+check your data-handling policy before pointing it at private code, and prefer the
+`custom` route with a self-hosted model where that matters.
+
+**Timeouts and failures.** `--timeout` keeps its meaning: the review is aborted if
+CodeScanAI prints nothing for that long (it logs one line per file, so this is a stall
+guard, not a cap on total duration). CodeScanAI exits 0 even when every file failed
+(no key, unreachable server); secscan reads its log and records the repository as
+failed when not a single file could be analysed, and prints a warning when only some
+could.
+
+**Limitations.** One model call per file means cost and rate-limit exposure grow with
+file count, not repository complexity; CodeScanAI's own README suggests splitting very
+large directories. There is no cross-file reasoning — each file is judged on its own
+(with full-file context, but nothing from the rest of the repository) — so
+architectural findings, secret sprawl across files, and CI/IaC review are better
+served by the Claude engine, and `--skill` packs cannot be applied. Severities are
+whatever the model wrote; keep the default `medium` fallback unless you have reviewed
+what unmapped labels your provider produces.
+
 ## Choosing a provider (`--provider`)
 
-The reviewer is always Claude Code (via the Claude Agent SDK); `--provider` only
-picks which API endpoint bills the tokens. Available on `run`, `scan`, and `review`.
+With the default `--engine claude`, the reviewer is always Claude Code (via the
+Claude Agent SDK); `--provider` only picks which API endpoint bills the tokens.
+Available on `run`, `scan`, and `review`. (With `--engine codescanai` use
+`--codescanai-provider` instead — see [Review engines](#review-engines---engine).)
 
 | `--provider` | Behavior |
 |---|---|
@@ -699,6 +845,7 @@ clears the stats for everyone using it.
 ```
 output/
   <owner>__<repo>/findings.csv   # High + Critical findings for that repo
+  <owner>__<repo>/codescanai-report.md   # CodeScanAI's raw report (--engine codescanai only)
   summary.csv                    # one row per repo: counts, status, cost, duration
   users.csv                      # org members + repo collaborators (secscan list-users)
   secscan.sqlite3                # state + findings + targets + issue tracking + users (unless --db-url)
@@ -712,8 +859,9 @@ uv run pytest            # full offline suite (no network, no credentials needed
 uv run pytest -v tests/test_emailer.py        # e.g. one module
 ```
 
-Tests never hit the network: the Claude Agent SDK, PyGithub, and SMTP are replaced
-with fakes. MySQL/MariaDB integration tests are skipped unless
+Tests never hit the network: the Claude Agent SDK, PyGithub, SMTP, and the
+`codescanai` CLI (a stub script that reproduces its output format) are replaced with
+fakes. MySQL/MariaDB integration tests are skipped unless
 `SECSCAN_TEST_MYSQL_URL` is set (see above).
 
 The [dry-run](#dry-run) guard is process-wide state, so `tests/conftest.py` disarms
@@ -725,6 +873,8 @@ not change what the suite exercises.
 
 - **Cost** scales with repo count/size. Use `--limit`, `--org`, `--max-cost-usd`, and the
   `sonnet` default to control spend; per-repo cost is recorded in `summary.csv`.
+  With `--engine codescanai` cost scales with *file count* (one call per file), is not
+  reported (`cost_usd` stays 0), and `--max-cost-usd` has no effect.
 - Very large monorepos may exceed one autonomous pass — a known limitation.
 - The reviewer cannot run scanners: known-CVE dependency checks, high-recall secret
   scanning and rule-based SAST belong to `osv-scanner`, `gitleaks`, Semgrep and

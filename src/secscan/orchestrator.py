@@ -14,7 +14,7 @@ import typer
 from github import Auth, Github
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from . import dryrun
+from . import codescanai, dryrun
 from .cloner import CloneError, cleanup, clone_repo, head_commit
 from .config import DEFAULT_API_URL, RunConfig
 from .findings import write_findings_csv, write_summary_csv
@@ -120,6 +120,14 @@ def _announce_dry_run(cfg: RunConfig) -> None:
 
 
 def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
+    if cfg.engine == codescanai.ENGINE_NAME:
+        # No Claude Code subprocess to route: CodeScanAI brings its own provider.
+        cs = cfg.codescanai
+        typer.echo(
+            f"Reviews run by CodeScanAI: {cs.endpoint_label}, model "
+            f"{cs.model or 'provider default'}."
+        )
+        return ProviderEnv(name=codescanai.ENGINE_NAME)
     provider_env = resolve_provider(cfg.provider)
     if provider_env.name != "anthropic":
         where = f" ({provider_env.endpoint})" if provider_env.endpoint else ""
@@ -131,6 +139,29 @@ def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
     if cfg.skills:
         typer.echo("Skills: " + ", ".join(s.name for s in cfg.skills))
     return provider_env
+
+
+async def _review(
+    cfg: RunConfig, path: Path, full_name: str, provider_env: ProviderEnv, out_dir: Path
+):
+    """Run the configured engine over one directory. `out_dir` is the repo's output
+    directory (next to findings.csv), for engine-specific artifacts."""
+    if cfg.engine == codescanai.ENGINE_NAME:
+        return await codescanai.review_repo(
+            path, full_name,
+            cfg=cfg.codescanai,
+            idle_timeout_s=cfg.timeout_s,
+            report_path=out_dir / codescanai.REPORT_FILENAME,
+        )
+    return await review_repo(
+        path, full_name,
+        model=cfg.model,
+        max_turns=cfg.max_turns,
+        max_cost_usd=cfg.max_cost_usd,
+        extra_env=provider_env.env,
+        idle_timeout_s=cfg.timeout_s,
+        skills=cfg.skills,
+    )
 
 
 async def _process_repo(
@@ -152,18 +183,10 @@ async def _process_repo(
                 if commit is not None:  # unreadable HEAD must never fail a scan
                     store.record_last_commit(owner, name, commit[0], commit[1])
                 store.mark(owner, name, Status.REVIEWING)
-            res = await review_repo(
-                path,
-                repo.full_name,
-                model=cfg.model,
-                max_turns=cfg.max_turns,
-                max_cost_usd=cfg.max_cost_usd,
-                extra_env=provider_env.env,
-                idle_timeout_s=cfg.timeout_s,
-                skills=cfg.skills,
-            )
+            repo_out = cfg.output_dir / f"{owner}__{name}"
+            res = await _review(cfg, path, repo.full_name, provider_env, repo_out)
 
-            csv_path = cfg.output_dir / f"{owner}__{name}" / "findings.csv"
+            csv_path = repo_out / "findings.csv"
             write_findings_csv(csv_path, repo.full_name, res.high_critical)
             if store is not None:
                 store.replace_findings(owner, name, res.high_critical)
@@ -353,13 +376,10 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
                 store.record_last_commit("local", name, commit[0], commit[1])
             store.mark("local", name, Status.REVIEWING)
 
-        res = await review_repo(
-            path, full_name, model=cfg.model, max_turns=cfg.max_turns,
-            max_cost_usd=cfg.max_cost_usd, extra_env=provider_env.env,
-            idle_timeout_s=cfg.timeout_s, skills=cfg.skills,
-        )
+        repo_out = cfg.output_dir / f"local__{name}"
+        res = await _review(cfg, path, full_name, provider_env, repo_out)
 
-        csv_path = cfg.output_dir / f"local__{name}" / "findings.csv"
+        csv_path = repo_out / "findings.csv"
         write_findings_csv(csv_path, full_name, res.high_critical)
 
         if store is not None:
@@ -379,9 +399,10 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
 
         if res.error:
             typer.echo(f"  ! review error: {res.error}")
+        unit = "files" if cfg.engine == codescanai.ENGINE_NAME else "turns"
         typer.echo(
             f"  {res.critical_count} critical, {res.high_count} high "
-            f"({res.total_findings} total) — ${res.cost_usd:.3f}, {res.num_turns} turns"
+            f"({res.total_findings} total) — ${res.cost_usd:.3f}, {res.num_turns} {unit}"
         )
         typer.echo(f"  CSV: {csv_path}")
         if store is not None:

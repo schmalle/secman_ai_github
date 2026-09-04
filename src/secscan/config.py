@@ -184,6 +184,11 @@ class RunConfig:
     issue_prefix: str = "secscan:"  # prepended to issue titles; empty string means no prefix
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
+    # Which reviewer does the work: "claude" (Claude Code via the Agent SDK,
+    # reviewer.py) or "codescanai" (the CodeScanAI CLI, codescanai.py).
+    engine: str = "claude"
+    # Resolved codescanai.CodeScanAIConfig when engine == "codescanai"; None otherwise.
+    codescanai: Any = None
     model: str = "sonnet"
     provider: str = "auto"  # anthropic | openrouter | kimi | copilot | auto | usecc (providers.py)
     max_turns: int = 60

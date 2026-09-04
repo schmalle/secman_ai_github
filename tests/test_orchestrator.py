@@ -722,3 +722,98 @@ async def test_review_local_forwards_skills_to_review(tmp_path, monkeypatch):
     await orch.review_local(cfg, _local_repo_dir(tmp_path))
 
     assert captured["skills"] == [pack]
+
+
+# --- --engine codescanai dispatch ---------------------------------------------------
+
+
+def _codescanai_cfg(tmp_path, **kw):
+    from secscan.codescanai import CodeScanAIConfig
+
+    base = dict(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3",
+                engine="codescanai", codescanai=CodeScanAIConfig(provider="openai"))
+    base.update(kw)
+    return RunConfig(**base)
+
+
+def test_resolve_provider_env_skips_claude_routing_for_codescanai(tmp_path, monkeypatch, capsys):
+    # An OpenRouter key in the shell must not be consulted (nor hinted about).
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    cfg = _codescanai_cfg(tmp_path, model="sonnet")
+
+    env = orch._resolve_provider_env(cfg)
+
+    assert env.name == "codescanai"
+    assert env.env == {}
+    assert cfg.model == "sonnet"  # not rewritten to an OpenRouter slug
+    out = capsys.readouterr().out
+    assert "CodeScanAI" in out and "openrouter" not in out.lower()
+
+
+async def test_process_repo_dispatches_to_codescanai(tmp_path, monkeypatch):
+    from secscan import codescanai
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    captured = {}
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        d = tmp_path / "clone"
+        d.mkdir(exist_ok=True)
+        return d
+
+    async def fake_claude_review(*a, **kw):  # pragma: no cover - must not run
+        raise AssertionError("the Claude reviewer must not run with --engine codescanai")
+
+    async def fake_codescanai_review(path, full_name, *, cfg, idle_timeout_s, report_path):
+        captured.update(path=path, full_name=full_name, cfg=cfg,
+                        idle_timeout_s=idle_timeout_s, report_path=report_path)
+        f = Finding(severity="high", title="t", description="d", file_path="a.py")
+        return ReviewResult(findings=[f], high_critical=[f], high_count=1, total_findings=1)
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_claude_review)
+    monkeypatch.setattr(codescanai, "review_repo", fake_codescanai_review)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+
+    cfg = _codescanai_cfg(tmp_path, timeout_s=123.0)
+    store = StateStore(cfg.state_target)
+    provider_env = orch.ProviderEnv(name="codescanai")
+
+    result = await orch._process_repo(
+        _repo(name="demo"), object(), store, cfg, asyncio.Semaphore(1), provider_env
+    )
+
+    assert result == (0, 1)
+    assert captured["cfg"] is cfg.codescanai
+    assert captured["idle_timeout_s"] == 123.0
+    assert captured["report_path"] == tmp_path / "octo__demo" / "codescanai-report.md"
+    assert (tmp_path / "octo__demo" / "findings.csv").exists()
+    rec = store.get("octo", "demo")
+    assert rec.high_count == 1 and rec.cost_usd == 0.0
+
+
+async def test_review_local_dispatches_to_codescanai(tmp_path, monkeypatch, capsys):
+    from secscan import codescanai
+    from secscan.reviewer import ReviewResult
+
+    captured = {}
+
+    async def fake_codescanai_review(path, full_name, *, cfg, idle_timeout_s, report_path):
+        captured.update(path=path, full_name=full_name, report_path=report_path)
+        return ReviewResult(num_turns=7)
+
+    monkeypatch.setattr(codescanai, "review_repo", fake_codescanai_review)
+    target = tmp_path / "myapp"
+    target.mkdir()
+    cfg = _codescanai_cfg(tmp_path, no_db=True)
+
+    await orch.review_local(cfg, target)
+
+    assert captured["full_name"] == "local/myapp"
+    assert captured["report_path"] == tmp_path / "local__myapp" / "codescanai-report.md"
+    assert "7 files" in capsys.readouterr().out
