@@ -47,3 +47,36 @@ contract and severity rubric from `prompts.py`, and stay concise (it is re-sent 
 turn). `tests/test_skills.py` checks every bundled skill loads; the evaluation of
 external skills and the rationale live in `docs/SECURITY_SKILLS.md` — update it when
 adding or changing a bundled skill.
+
+## Review engines
+
+`--engine` (`RunConfig.engine`, resolved in `cli._resolve_engine`) picks what performs
+the review step; `orchestrator._review` is the single dispatch point and everything
+around it (clone, CSV, state, issues, secman, email) is engine-agnostic. `claude`
+(default) is `reviewer.review_repo`; `codescanai` is `codescanai.review_repo`, which
+runs the [CodeScanAI](https://github.com/codescan-ai/codescan) CLI as a subprocess and
+parses its per-file Markdown report (format pinned in `codescanai.parse_report`, from
+CodeScanAI 0.1.4's `core/code_scanner/agent_scanner.py`). Both return
+`reviewer.ReviewResult`.
+
+Rules that must survive changes to the CodeScanAI engine:
+
+- **No secret on argv.** CodeScanAI's own `--token`/`--host` are never passed; the
+  custom server URL and token go through `OPENAI_BASE_URL`/`OPENAI_API_KEY` in the
+  subprocess env (`codescanai.subprocess_env`), and `CODESCANAI_TOKEN` is env-only —
+  there is deliberately no `--codescanai-token` flag (`tests/test_cli_engine.py`
+  pins this, like the `--db-password`/`--secman-password` tests).
+- **Minimal subprocess env.** Only `codescanai._ENV_ALLOWLIST` plus the active
+  provider's credential is forwarded; GitHub/DB/secman/SMTP secrets must not reach a
+  process that uploads file contents to a third party.
+- **Fail from the log, not the exit code.** CodeScanAI exits 0 when every file
+  errored; `review_repo` turns "all files errored" into `ReviewResult.error`.
+- **Engine-specific flags are errors on the other engine** (`--skill`/`--provider`
+  with codescanai, `--codescanai-*` with claude); `CODESCANAI_*` env never is.
+- **Check CodeScanAI upstream** when touching the parser or the invocation: its output
+  shape, argument names (`--changes_only`, underscores) and provider wiring live in
+  `codescan-ai/codescan`, and the PyPI release may lag or lead the repo.
+
+When adding a third engine, add it to `cli._ENGINES`, dispatch in
+`orchestrator._review`, keep the `ReviewResult` contract, and cover the fail-fast
+config path in `tests/test_cli_engine.py`.

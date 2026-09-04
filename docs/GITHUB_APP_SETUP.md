@@ -168,6 +168,19 @@ Anthropic** — an `OPENROUTER_API_KEY` left over in your shell silently wins ov
 | *(none)* | Falls back to a logged-in Claude Code subscription — run `claude login` once. `--provider usecc` forces this and ignores every key above. |
 | `COPILOT_BASE_URL` / `COPILOT_API_KEY` | Local Copilot bridge. Never auto-selected; requires `--provider copilot`. |
 
+The table above is for the default `--engine claude`. With `--engine codescanai`
+(or `SECSCAN_ENGINE=codescanai`) none of it applies — the review is done by the
+[CodeScanAI](https://github.com/codescan-ai/codescan) CLI, which needs
+`pip install codescanai` plus one of these instead (see the README's
+[Review engines](../README.md#review-engines---engine)):
+
+| Variable | Purpose |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI. Auto-selected whenever set. `OPENAI_BASE_URL` redirects it to an OpenAI-compatible gateway. |
+| `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Google Gemini. Auto-selected when set and no OpenAI key is present. |
+| `CODESCANAI_HOST` / `CODESCANAI_PORT` / `CODESCANAI_ENDPOINT` / `CODESCANAI_TOKEN` | A self-hosted OpenAI-compatible server (Ollama, vLLM, …); requires `--codescanai-provider custom`. The token is env-only. |
+| `CODESCANAI_PROVIDER` / `CODESCANAI_MODEL` / `CODESCANAI_BIN` / `CODESCANAI_DEFAULT_SEVERITY` | Defaults for the matching `--codescanai-*` flags. |
+
 ### Optional integrations
 
 | Variable | Purpose |
