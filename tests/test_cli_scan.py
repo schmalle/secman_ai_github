@@ -338,3 +338,57 @@ def test_scan_github_api_url_defaults_to_none(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert captured["cfg"].github_api_url is None
+
+
+def test_scan_skill_flag_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(
+        app,
+        ["scan", "octo/demo", "--output-dir", str(tmp_path),
+         "--skill", "false-positive-filter", "--skill", "cicd-and-iac"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [s.name for s in captured["cfg"].skills] == ["false-positive-filter", "cicd-and-iac"]
+
+
+def test_scan_unknown_skill_fails_before_any_network(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    async def fake_scan_repo(cfg, owner, name):  # pragma: no cover - must not run
+        raise AssertionError("scan must not start with an unresolvable --skill")
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+
+    result = runner.invoke(
+        app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--skill", "missing"]
+    )
+
+    assert result.exit_code == 1
+    assert "missing" in result.output
+
+
+def test_run_skill_flag_reaches_config(tmp_path, monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_run_scan(cfg, org=None, repos_file=None, targets_only=False):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(secscan.orchestrator, "run_scan", fake_run_scan)
+
+    result = runner.invoke(
+        app, ["run", "--output-dir", str(tmp_path), "--skill", "llm-app-security"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [s.name for s in captured["cfg"].skills] == ["llm-app-security"]

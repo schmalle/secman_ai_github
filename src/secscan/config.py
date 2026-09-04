@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 DEFAULT_API_URL = "https://api.github.com"
@@ -197,6 +198,10 @@ class RunConfig:
     smtp_host: str | None = None
     smtp_port: int | None = None
     email_subject: str | None = None  # None = default findings-summary subject
+    # Operator-chosen security skill packs (skills.Skill objects, already loaded and
+    # validated by the CLI). Their bodies are appended to the reviewer's system prompt;
+    # see skills.py for the trust model. Empty = the base prompt only.
+    skills: list[Any] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)

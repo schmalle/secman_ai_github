@@ -111,6 +111,8 @@ uv run secscan scan octo/webapp           # clone + review one remote repo on de
 uv run secscan scan octo/webapp --branch develop   # review a specific branch
 uv run secscan review ./some/local/repo   # review one local dir (no GitHub)
 uv run secscan review ./some/local/repo --store-db   # …and record it in the state DB
+uv run secscan skills list                # bundled security skill packs for --skill
+uv run secscan scan octo/webapp --skill false-positive-filter --skill owasp-top10   # sharper review
 uv run secscan run --limit 1              # full pipeline, one repo (smoke test)
 uv run secscan run --org my-org           # scope to one org
 uv run secscan run --targets-only         # only scan 'repo add' targets (skip App enumeration)
@@ -171,6 +173,40 @@ exactly as on `run`/`scan`. Reviewing the same directory again replaces its
 findings, and `stats`, `report` and `push-to-secman` then see local reviews alongside
 GitHub ones. `--create-issues` remains `run`/`scan`-only — a local directory has no
 GitHub repo to file against.
+
+## Security skills (`--skill`)
+
+The reviewer's base prompt is general-purpose. `--skill` (on `run`, `scan`, and
+`review`, repeatable) appends operator-chosen **skill packs** — Markdown
+checklists in the [Agent Skills](https://agentskills.io) `SKILL.md` format — to
+its system prompt, so a review can be sharpened for a technology or held to a
+stricter false-positive bar without changing the tool. Four are bundled:
+
+| Skill | What it adds |
+|---|---|
+| `false-positive-filter` | Exploitability bar, hard exclusions and precedent rules adapted from Anthropic's `claude-code-security-review` action — recommended whenever findings feed `--create-issues` or `--push-to-secman` |
+| `owasp-top10` | OWASP Top 10:2025 as a read-only review checklist: what to grep for, evidence required, severity/CWE mapping |
+| `cicd-and-iac` | GitHub Actions pwn-requests and expression injection, AI agents in CI, Dockerfile/Kubernetes/Terraform misconfigurations |
+| `llm-app-security` | Prompt injection reaching tools, LLM output in dangerous sinks, excessive agency, MCP servers, RAG boundaries |
+
+```bash
+uv run secscan skills list                                   # names + descriptions
+uv run secscan skills show false-positive-filter             # print one in full
+uv run secscan run --org my-org --skill false-positive-filter --skill owasp-top10
+uv run secscan review ./repo --skill ./my-skills/company-rules   # any SKILL.md directory
+```
+
+A bare name is a bundled skill; anything else is a path to a skill directory (or
+its `SKILL.md`), so skills published on GitHub — e.g. agamm/claude-code-owasp or
+the reasoning-only Trail of Bits plugins — can be cloned and used as-is. Unknown
+names fail before anything is cloned. Skills never widen the reviewer's read-only
+tool set, never change the JSON output contract or severity rubric, and are never
+auto-discovered from the scanned repository (its `.claude/` directory is untrusted).
+Their text is re-sent every turn, so each one adds a few thousand tokens per turn.
+
+Which GitHub-hosted security skills fit this tool, which do not and why, how the
+bundled ones were derived, and how to write your own:
+**[docs/SECURITY_SKILLS.md](docs/SECURITY_SKILLS.md)**.
 
 ## Dry run
 
@@ -690,4 +726,7 @@ not change what the suite exercises.
 - **Cost** scales with repo count/size. Use `--limit`, `--org`, `--max-cost-usd`, and the
   `sonnet` default to control spend; per-repo cost is recorded in `summary.csv`.
 - Very large monorepos may exceed one autonomous pass — a known limitation.
+- The reviewer cannot run scanners: known-CVE dependency checks, high-recall secret
+  scanning and rule-based SAST belong to `osv-scanner`, `gitleaks`, Semgrep and
+  friends — see [docs/SECURITY_SKILLS.md](docs/SECURITY_SKILLS.md#gaps-a-skill-cannot-close).
 - For stronger isolation, run reviews inside a throwaway network-less container.
