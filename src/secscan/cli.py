@@ -211,6 +211,7 @@ def _run_config(
     # process-wide.
     if not push_to_secman and (secman_url or secman_username):
         raise ConfigError("--secman-url/--secman-username require --push-to-secman")
+    secman_password: str | None = None
     if push_to_secman:
         from .secman_push import resolve_credentials
 
@@ -342,7 +343,7 @@ def run(
         cfg = _run_config(
             output_dir, concurrency, model, max_turns, max_cost_usd,
             include_archived, include_forks, max_size_mb, keep_clones, resume, limit,
-            db_url=_resolve_db_url(db_url), db_user=db_user, db_password=_resolve_db_password(None),
+            db_url=_resolve_db_url(db_url), db_user=db_user,
             db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
@@ -608,7 +609,7 @@ def review(
         output_dir, 1, model, max_turns, max_cost_usd,
         False, False, 0, True, True, None,
         db_url=_resolve_db_url(db_url), db_user=_resolve_db_user(db_user),
-        db_password=_resolve_db_password(None), db_ssl=_resolve_db_ssl(db_ssl),
+        db_ssl=_resolve_db_ssl(db_ssl),
         no_db=not store_db,
         provider=provider, timeout_s=timeout,
     )
@@ -666,7 +667,7 @@ def scan(
         cfg = _run_config(
             output_dir, 1, model, max_turns, max_cost_usd,
             False, False, 0, keep_clones, False, None,
-            db_url=_resolve_db_url(db_url), db_user=db_user, db_password=_resolve_db_password(None),
+            db_url=_resolve_db_url(db_url), db_user=db_user,
             db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
