@@ -1,3 +1,4 @@
+from pathlib import Path
 import asyncio
 
 import pytest
@@ -817,3 +818,267 @@ async def test_review_local_dispatches_to_codescanai(tmp_path, monkeypatch, caps
     assert captured["full_name"] == "local/myapp"
     assert captured["report_path"] == tmp_path / "local__myapp" / "codescanai-report.md"
     assert "7 files" in capsys.readouterr().out
+
+
+# --- --fix / --create-fix-prs ------------------------------------------------------------------
+
+
+def _fix_result_for(findings, patch="diff --git a/app.py b/app.py\n+fixed\n"):
+    from secscan.fixer import FixResult
+
+    return FixResult(patch=patch, changed_files=["app.py"], findings=list(findings),
+                     summary={"fixes": [{"title": findings[0].title, "status": "fixed", "summary": "s"}]},
+                     cost_usd=0.05)
+
+
+async def test_process_repo_runs_fixer_and_opens_pr(tmp_path, monkeypatch, capsys):
+    from secscan import fixer, pull_requests
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    finding = Finding(severity="critical", title="SQLi", description="d", file_path="app.py")
+    res = ReviewResult(findings=[finding], high_critical=[finding], critical_count=1, total_findings=1)
+    calls = {}
+
+    async def fake_mint_token(auth, repo):
+        return "ghs_tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        clone = tmp_path / "clone"
+        clone.mkdir(exist_ok=True)
+        return clone
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return res
+
+    async def fake_fix_findings(cfg, workspace, full_name, findings, provider_env):
+        calls["fix"] = (workspace, full_name, [f.title for f in findings])
+        return _fix_result_for(findings)
+
+    async def fake_current_branch(path):
+        return "main"
+
+    async def fake_create_fix_pr(**kwargs):
+        calls["pr"] = kwargs
+        return pull_requests.FixPrOutcome("created", pr_url="https://github.com/octo/demo/pull/1", branch="secscan/fix-x")
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+    monkeypatch.setattr(fixer, "fix_findings", fake_fix_findings)
+    monkeypatch.setattr(fixer, "current_branch", fake_current_branch)
+    monkeypatch.setattr(pull_requests, "create_fix_pr", fake_create_fix_pr)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", fix=True,
+                    create_fix_prs=True, pr_prefix="[acme]", pr_draft=True)
+    store = StateStore(cfg.state_target)
+    auth = _FakeAuth(host=GithubHost())
+    await orch._process_repo(_repo(name="demo"), auth, store, cfg, asyncio.Semaphore(1), orch.ProviderEnv(name="anthropic"))
+
+    assert calls["fix"] == (tmp_path / "clone", "octo/demo", ["SQLi"])
+    pr = calls["pr"]
+    assert pr["base_branch"] == "main" and pr["token"] == "ghs_tok" and pr["dry_run"] is False
+    assert pr["prefix"] == "[acme]" and pr["draft"] is True and pr["repo"].full_name == "octo/demo"
+    assert (tmp_path / "octo__demo" / "fixes.patch").read_text().startswith("diff --git")
+    assert (tmp_path / "octo__demo" / "fixes.json").exists()
+    out = capsys.readouterr().out
+    assert "fix PR: created https://github.com/octo/demo/pull/1" in out
+    assert store.get("octo", "demo").status.value == "done"
+
+
+async def test_process_repo_fix_only_writes_patch_without_pr(tmp_path, monkeypatch):
+    from secscan import fixer, pull_requests
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+    res = ReviewResult(findings=[finding], high_critical=[finding], high_count=1, total_findings=1)
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        (tmp_path / "clone").mkdir(exist_ok=True)
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return res
+
+    async def fake_fix_findings(cfg, workspace, full_name, findings, provider_env):
+        return _fix_result_for(findings)
+
+    async def explode(**kwargs):
+        raise AssertionError("no PR without --create-fix-prs")
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+    monkeypatch.setattr(fixer, "fix_findings", fake_fix_findings)
+    monkeypatch.setattr(pull_requests, "create_fix_pr", explode)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", fix=True, branch="dev")
+    store = StateStore(cfg.state_target)
+    await orch._process_repo(_repo(name="demo"), _FakeAuth(), store, cfg, asyncio.Semaphore(1), orch.ProviderEnv(name="anthropic"))
+    assert (tmp_path / "octo__demo" / "fixes.patch").exists()
+
+
+async def test_process_repo_skips_fixer_when_pr_already_tracked(tmp_path, monkeypatch, capsys):
+    from secscan import fixer
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+    res = ReviewResult(findings=[finding], high_critical=[finding], high_count=1, total_findings=1)
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        (tmp_path / "clone").mkdir(exist_ok=True)
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return res
+
+    async def explode(*a, **k):
+        raise AssertionError("the fixer must not run for an already-open PR")
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+    monkeypatch.setattr(fixer, "fix_findings", explode)
+
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3", fix=True, create_fix_prs=True)
+    store = StateStore(cfg.state_target)
+    store.record_fix_pr("octo", "demo", fixer.fix_key([finding]), 5, "https://github.com/octo/demo/pull/5", "b", "now")
+    await orch._process_repo(_repo(name="demo"), _FakeAuth(host=GithubHost()), store, cfg, asyncio.Semaphore(1), orch.ProviderEnv(name="anthropic"))
+    assert "already open" in capsys.readouterr().out
+
+
+async def test_process_repo_no_fix_without_flag(tmp_path, monkeypatch):
+    from secscan import fixer
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+    res = ReviewResult(findings=[finding], high_critical=[finding], high_count=1, total_findings=1)
+
+    async def fake_mint_token(auth, repo):
+        return "tok"
+
+    async def fake_clone(repo, token, root, branch=None):
+        return tmp_path / "clone"
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return res
+
+    async def explode(*a, **k):
+        raise AssertionError("fixer must not run")
+
+    monkeypatch.setattr(orch, "_mint_token", fake_mint_token)
+    monkeypatch.setattr(orch, "_clone", fake_clone)
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "cleanup", lambda path: None)
+    monkeypatch.setattr(fixer, "fix_findings", explode)
+    cfg = RunConfig(output_dir=tmp_path, state_db=tmp_path / "secscan.sqlite3")
+    await orch._process_repo(_repo(name="demo"), _FakeAuth(), StateStore(cfg.state_target), cfg, asyncio.Semaphore(1), orch.ProviderEnv(name="anthropic"))
+
+
+async def test_review_local_fix_uses_a_disposable_workspace(tmp_path, monkeypatch, capsys):
+    from secscan import fixer
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    src = tmp_path / "proj"
+    src.mkdir()
+    (src / "app.py").write_text("bad\n")
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return ReviewResult(findings=[finding], high_critical=[finding], high_count=1, total_findings=1)
+
+    seen = {}
+
+    async def fake_fix_findings(cfg, workspace, full_name, findings, provider_env):
+        seen["workspace"] = Path(workspace)
+        Path(workspace, "app.py").write_text("good\n")
+        return _fix_result_for(findings)
+
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(fixer, "fix_findings", fake_fix_findings)
+    cfg = RunConfig(output_dir=tmp_path / "out", no_db=True, fix=True)
+    await orch.review_local(cfg, src)
+
+    assert seen["workspace"] != src.resolve()
+    assert (src / "app.py").read_text() == "bad\n"  # the user's directory is untouched
+    assert not seen["workspace"].exists()  # temp workspace cleaned up
+    assert (tmp_path / "out" / "local__proj" / "fixes.patch").exists()
+
+
+async def test_review_local_create_fix_prs_needs_a_github_origin(tmp_path, monkeypatch, capsys):
+    from secscan import fixer
+    from secscan.findings import Finding
+    from secscan.reviewer import ReviewResult
+
+    src = tmp_path / "proj"
+    src.mkdir()
+    (src / "app.py").write_text("bad\n")
+    finding = Finding(severity="high", title="SQLi", description="d", file_path="app.py")
+
+    async def fake_review_repo(path, full_name, **kwargs):
+        return ReviewResult(findings=[finding], high_critical=[finding], high_count=1, total_findings=1)
+
+    async def fake_fix_findings(cfg, workspace, full_name, findings, provider_env):
+        return _fix_result_for(findings)
+
+    monkeypatch.setattr(orch, "review_repo", fake_review_repo)
+    monkeypatch.setattr(orch, "build_auth", lambda api_url=None: _FakeAuth(pat=object(), host=GithubHost()))
+    monkeypatch.setattr(fixer, "fix_findings", fake_fix_findings)
+    cfg = RunConfig(output_dir=tmp_path / "out", state_db=tmp_path / "s.sqlite3", fix=True, create_fix_prs=True)
+    await orch.review_local(cfg, src)
+    out = capsys.readouterr().out
+    assert "no 'origin' remote" in out
+    assert (tmp_path / "out" / "local__proj" / "fixes.patch").exists()
+
+
+def test_resolve_provider_env_for_cli_engines(tmp_path, capsys):
+    from secscan.codex import CodexConfig
+    from secscan.kimi_cli import KimiConfig
+
+    cfg = RunConfig(engine="codex", codex=CodexConfig(model="gpt-5.4"))
+    assert orch._resolve_provider_env(cfg).name == "codex"
+    assert "Codex CLI" in capsys.readouterr().out
+    cfg = RunConfig(engine="kimi-cli", kimi=KimiConfig(model="kimi-for-coding", auth="login"))
+    assert orch._resolve_provider_env(cfg).name == "kimi-cli"
+    assert "Kimi CLI" in capsys.readouterr().out
+
+
+def test_resolve_provider_env_pins_gateway_models(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    monkeypatch.delenv("OPENROUTER_SMALL_MODEL", raising=False)
+    cfg = RunConfig(model="sonnet", provider="auto")
+    pe = orch._resolve_provider_env(cfg)
+    assert pe.env["ANTHROPIC_MODEL"] == "anthropic/claude-sonnet-5"
+    assert pe.env["ANTHROPIC_SMALL_FAST_MODEL"] == "anthropic/claude-haiku-4.5"
+    assert pe.env["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
+
+
+async def test_review_dispatches_to_codex_and_kimi(tmp_path, monkeypatch):
+    from secscan import codex, kimi_cli
+    from secscan.reviewer import ReviewResult
+
+    seen = []
+
+    async def fake(path, full_name, *, cfg, idle_timeout_s, skills):
+        seen.append((cfg, idle_timeout_s, list(skills)))
+        return ReviewResult()
+
+    monkeypatch.setattr(codex, "review_repo", fake)
+    monkeypatch.setattr(kimi_cli, "review_repo", fake)
+    for engine, attr in (("codex", "codex"), ("kimi-cli", "kimi")):
+        cfg = RunConfig(engine=engine, timeout_s=5.0, **{attr: engine})
+        await orch._review(cfg, tmp_path, "octo/demo", orch.ProviderEnv(name=engine), tmp_path)
+    assert seen == [("codex", 5.0, []), ("kimi-cli", 5.0, [])]

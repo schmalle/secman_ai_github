@@ -166,6 +166,48 @@ def resolve_model(provider_env: ProviderEnv, model: str) -> str:
     return _MODEL_ALIASES.get(provider_env.name, {}).get(model, model)
 
 
+# Claude Code makes calls with more than one model: the main model for the
+# conversation, and a "small fast" model (Haiku by default) for background work
+# such as summarising tool output. Against Anthropic those resolve by alias; through
+# a gateway the aliases do not exist, and the background calls fail with an
+# unknown-model error unless every one of them is pinned to a slug the gateway
+# serves. `--model` pins the main model; these pin the rest. The haiku-class slug
+# is separately overridable because it is the one most likely to move.
+_SMALL_MODEL_ENV = {"openrouter": "OPENROUTER_SMALL_MODEL", "kimi": None, "copilot": "COPILOT_SMALL_MODEL"}
+_SMALL_MODEL_DEFAULT = {"openrouter": "anthropic/claude-haiku-4.5"}
+
+
+def gateway_model_env(provider_env: ProviderEnv, model: str) -> dict[str, str]:
+    """Extra env pinning every model the Claude Code CLI may pick to `model`.
+
+    Empty for the Anthropic-direct providers, where the CLI's own aliases work.
+    Also switches off the CLI's non-essential traffic (update checks, telemetry),
+    which a third-party gateway does not serve.
+    """
+    if provider_env.name not in _MODEL_ALIASES:
+        return {}
+    small_var = _SMALL_MODEL_ENV.get(provider_env.name)
+    small = (_env(small_var) if small_var else None) or _SMALL_MODEL_DEFAULT.get(provider_env.name) or model
+    return {
+        "ANTHROPIC_MODEL": model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": small,
+        "ANTHROPIC_SMALL_FAST_MODEL": small,
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    }
+
+
+def with_model_env(provider_env: ProviderEnv, model: str) -> ProviderEnv:
+    """`provider_env` with `gateway_model_env` merged into its env overrides."""
+    extra = gateway_model_env(provider_env, model)
+    if not extra:
+        return provider_env
+    return ProviderEnv(
+        name=provider_env.name, env={**provider_env.env, **extra}, endpoint=provider_env.endpoint
+    )
+
+
 def model_hint(provider_env: ProviderEnv, model: str) -> str | None:
     """Non-fatal usability hint when the model name doesn't fit the provider."""
     if provider_env.name == "openrouter" and "/" not in model:

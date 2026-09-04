@@ -164,3 +164,18 @@ def test_stats_empty_db_is_sane(tmp_path):
     assert payload["findings"]["total"] == 0
     assert payload["last_reviewed_at"] == ""
     assert payload["top_repos"] == []
+
+
+def test_stats_reports_fix_prs(tmp_path):
+    import json
+
+    from secscan.state import StateStore
+
+    store = StateStore(tmp_path / "secscan.sqlite3")
+    store.record_fix_pr("octo", "demo", "k" * 64, 7, "https://github.com/octo/demo/pull/7", "secscan/fix-k", "now")
+    store.close()
+    result = runner.invoke(app, ["stats", "--output-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "Fix PRs opened: 1" in result.output
+    result = runner.invoke(app, ["stats", "--format", "json", "--output-dir", str(tmp_path)])
+    assert json.loads(result.output)["fix_prs_tracked"] == 1

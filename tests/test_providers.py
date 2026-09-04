@@ -239,3 +239,42 @@ def test_resolve_model_copilot_env_override_wins_for_aliases(monkeypatch):
 def test_model_hint_for_unmapped_copilot_alias():
     assert "gpt-4.1" in model_hint(ProviderEnv(name="copilot", env={}), "haiku")
     assert model_hint(ProviderEnv(name="copilot", env={}), "claude-sonnet-4.5") is None
+
+
+# --- gateway model pinning ------------------------------------------------------------------
+
+
+def test_gateway_model_env_pins_every_model_for_openrouter(monkeypatch):
+    from secscan.providers import ProviderEnv, gateway_model_env, with_model_env
+
+    monkeypatch.delenv("OPENROUTER_SMALL_MODEL", raising=False)
+    env = gateway_model_env(ProviderEnv(name="openrouter"), "anthropic/claude-sonnet-5")
+    assert env["ANTHROPIC_MODEL"] == "anthropic/claude-sonnet-5"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "anthropic/claude-sonnet-5"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "anthropic/claude-sonnet-5"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "anthropic/claude-haiku-4.5"
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "anthropic/claude-haiku-4.5"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+    monkeypatch.setenv("OPENROUTER_SMALL_MODEL", "anthropic/claude-haiku-5")
+    assert gateway_model_env(ProviderEnv(name="openrouter"), "m")["ANTHROPIC_SMALL_FAST_MODEL"] == "anthropic/claude-haiku-5"
+
+    merged = with_model_env(ProviderEnv(name="openrouter", env={"ANTHROPIC_AUTH_TOKEN": "t"}, endpoint="e"), "m")
+    assert merged.env["ANTHROPIC_AUTH_TOKEN"] == "t" and merged.env["ANTHROPIC_MODEL"] == "m"
+    assert merged.endpoint == "e"
+
+
+def test_gateway_model_env_uses_main_model_as_small_model_for_kimi():
+    from secscan.providers import ProviderEnv, gateway_model_env
+
+    env = gateway_model_env(ProviderEnv(name="kimi"), "kimi-k2.7-code")
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "kimi-k2.7-code"
+
+
+def test_gateway_model_env_is_empty_for_anthropic_and_usecc():
+    from secscan.providers import ProviderEnv, gateway_model_env, with_model_env
+
+    for name in ("anthropic", "usecc"):
+        assert gateway_model_env(ProviderEnv(name=name), "sonnet") == {}
+        pe = ProviderEnv(name=name)
+        assert with_model_env(pe, "sonnet") is pe

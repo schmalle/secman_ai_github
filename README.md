@@ -1,46 +1,64 @@
 # secscan
 
-A command-line tool that enumerates **all reachable repositories** of a GitHub App
-(plus any explicitly-added repos), clones each one, runs an
-**autonomous Claude Code security review** over the full codebase, and writes a
+A command-line tool that security-reviews GitHub repositories with an autonomous
+coding agent. Point it at a **local checkout** (`secscan review ./dir`), a **single
+remote repository** (`secscan scan owner/name` or a URL — cloned with a GitHub App
+installation token or a personal access token), or **every repository a GitHub App can
+reach** (`secscan run`). Each review runs over a local clone, and writes a
 **CSV of High/Critical findings per repository** plus an aggregate `summary.csv` index.
 Findings and state also live in a database (SQLite by default, MySQL/MariaDB
-optionally), and results can be emailed as an HTML report.
+optionally), findings can become GitHub issues or secman vulnerabilities, results can
+be emailed as an HTML report — and with `--fix` / `--create-fix-prs` the agent goes
+back in, remediates the High/Critical findings, and opens a **pull request with the
+proposed fixes** (see [Fixing findings](#fixing-findings---fix-and---create-fix-prs)).
 
-The review step is pluggable: the default engine is Claude Code, and
-[CodeScanAI](https://github.com/codescan-ai/codescan) (OpenAI, Gemini, or any
-OpenAI-compatible server such as Ollama) can be selected with `--engine codescanai`
-— see [Review engines](#review-engines---engine).
+The review step is pluggable (`--engine`): **Claude Code** (default; billed through
+Anthropic directly, a Claude subscription login, OpenRouter, Moonshot/Kimi, or a
+Copilot bridge), the **OpenAI Codex CLI**, the **Kimi Code CLI**, or
+[CodeScanAI](https://github.com/codescan-ai/codescan) — see
+[Review engines](#review-engines---engine).
 
 ## How it works
 
 ```
 list installations → mint installation token → list repos (filter)
    + explicit targets (secscan repo add / --repos-file), resolved via their installation
-   → shallow clone → Claude read-only security review → validate findings JSON
+   → shallow clone (or: a local directory you already have)
+   → read-only security review by the chosen engine → validate findings JSON
    → write per-repo CSV + DB findings → update state ↘ aggregate summary.csv
-                                                     ↘ secscan send-report (HTML email)
+                                                     ↘ --create-issues (GitHub issues)
+                                                     ↘ --fix → fixes.patch
+                                                        ↘ --create-fix-prs (branch + PR)
+                                                     ↘ --push-to-secman, send-report
 ```
 
-The review agent runs with **read-only tools only** (`Read`, `Grep`, `Glob`) — no
-Bash, no network — so untrusted repository code is never executed. Repo contents are
-treated as untrusted data (prompt-injection aware).
+Every review — and every fix — is performed on a **local checkout**: either the
+directory you hand to `review` (already cloned, nothing is fetched) or a fresh shallow
+clone `scan`/`run` make with the App or PAT credential. The review agent runs with
+**read-only tools only** (`Read`, `Grep`, `Glob`) — no Bash, no network — so untrusted
+repository code is never executed. Repo contents are treated as untrusted data
+(prompt-injection aware); with the Codex engine the agent has a shell, confined to
+Codex's own read-only sandbox (see [Review engines](#review-engines---engine)).
 
-With `--engine codescanai` the "Claude read-only security review" box is replaced by a
-CodeScanAI subprocess over the same clone; everything before and after it (enumeration,
-cloning, CSV, state, issues, secman, email) is unchanged.
+Switching `--engine` replaces only the review (and fix) box; everything before and after
+it — enumeration, cloning, CSV, state, issues, fix PRs, secman, email — is unchanged.
 
 ## Prerequisites
 
 - Python 3.10+ (this repo pins 3.12 via `uv`).
 - `git` on `PATH`.
-- Node + the Claude Code CLI installed and authenticated. The Claude Agent SDK shells
-  out to it. Auth via `ANTHROPIC_API_KEY`, a logged-in Claude subscription, **or** an
-  `OPENROUTER_API_KEY`, a Moonshot/Kimi key, or a local GitHub Copilot bridge (see
-  [Choosing a provider](#choosing-a-provider---provider)). Not needed with
-  `--engine codescanai`, which instead needs the `codescanai` CLI
-  (`pip install codescanai`) and an OpenAI/Gemini key or a self-hosted server — see
-  [Review engines](#review-engines---engine).
+- One review engine, installed and authenticated (see
+  [Review engines](#review-engines---engine)):
+  - **Claude Code** (default): Node + the Claude Code CLI (`npm install -g
+    @anthropic-ai/claude-code`); the Claude Agent SDK shells out to it. Auth via
+    `ANTHROPIC_API_KEY`, a logged-in Claude subscription (`claude login`, i.e. your
+    Claude Code license), **or** an `OPENROUTER_API_KEY`, a Moonshot/Kimi key, or a
+    local GitHub Copilot bridge (see [Choosing a provider](#choosing-a-provider---provider)).
+  - **Codex CLI**: `npm install -g @openai/codex`, then `OPENAI_API_KEY` or `codex login`.
+  - **Kimi CLI**: `uv tool install kimi-cli` (Python 3.12+), then `KIMI_API_KEY`,
+    `MOONSHOT_API_KEY`, or `kimi login`.
+  - **CodeScanAI**: `pip install codescanai` and an OpenAI/Gemini key or a self-hosted
+    server.
 - GitHub credentials. A **GitHub App** is the primary credential; a PAT is an
   optional fallback. Either works alone.
   - **GitHub App** — installed on the target org(s)/repos with permissions
@@ -86,14 +104,19 @@ the environment only and never written to disk.
 | `GITHUB_TOKEN` | Personal access token — optional fallback for repos the App is not installed on |
 | `GITHUB_API_URL` | GitHub deployment (or `--github-api-url`); unset = github.com / Enterprise Cloud. See [GitHub Enterprise](#github-enterprise-cloud-and-server) |
 | `ANTHROPIC_API_KEY` | Claude auth (or use a subscription login) |
-| `OPENROUTER_API_KEY` | Route reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
+| `OPENROUTER_API_KEY` | Route Claude Code reviews through OpenRouter (auto-selected when set unless `--provider usecc`) |
+| `OPENROUTER_SMALL_MODEL` | OpenRouter slug for Claude Code's background "small fast" model (default `anthropic/claude-haiku-4.5`); `COPILOT_SMALL_MODEL` is the Copilot equivalent |
+| `CLAUDE_CONFIG_DIR` | Forwarded to the Claude Code subprocess, so a login stored outside `~/.claude` keeps working |
 | `MOONSHOT_API_KEY` | Route reviews through Kimi (Moonshot); `KIMI_API_KEY` works too. Auto-selected when set and no OpenRouter key is present |
 | `KIMI_BASE_URL` | Override the Kimi endpoint (default `https://api.moonshot.ai/anthropic`; mainland China: `https://api.moonshot.cn/anthropic`) |
 | `KIMI_MODEL` | Kimi model the default `--model` alias resolves to (default `kimi-k2.7-code`) |
 | `COPILOT_BASE_URL` | Anthropic-compatible GitHub Copilot bridge for `--provider copilot` (default `http://localhost:4141`) |
 | `COPILOT_API_KEY` | Token for that bridge, if it requires one (`GITHUB_COPILOT_API_KEY` works too) |
 | `COPILOT_MODEL` | Copilot model the default `--model` alias resolves to (default `claude-sonnet-4.5`) |
-| `SECSCAN_ENGINE` | Review engine (or `--engine`): `claude` (default) or `codescanai`. See [Review engines](#review-engines---engine) |
+| `SECSCAN_ENGINE` | Review engine (or `--engine`): `claude` (default), `codex`, `kimi-cli` or `codescanai`. See [Review engines](#review-engines---engine) |
+| `CODEX_BIN` / `CODEX_MODEL` / `CODEX_HOME` | `--engine codex`: how to invoke the Codex CLI (default `codex`), the model the default `--model` alias resolves to (else Codex's own default), and where `codex login` stored its credentials (default `~/.codex`) |
+| `KIMI_API_KEY` | `--engine kimi-cli`: Kimi Code platform key (`https://api.kimi.com/coding/v1`); `MOONSHOT_API_KEY` selects the Moonshot open platform instead. Without either, a prior `kimi login` is used |
+| `KIMI_BIN` / `KIMI_CLI_BASE_URL` / `KIMI_SHARE_DIR` | `--engine kimi-cli`: how to invoke the Kimi CLI (default `kimi`), an endpoint override for the CLI (a `KIMI_BASE_URL` ending in `/anthropic` is ignored here — that one belongs to `--provider kimi`), and Kimi's config directory (default `~/.kimi`) |
 | `OPENAI_API_KEY` | OpenAI key for `--engine codescanai` (`--codescanai-provider openai`, auto-selected when set); `OPENAI_BASE_URL` points it at an OpenAI-compatible gateway |
 | `GEMINI_API_KEY` | Google Gemini key for `--engine codescanai` (`--codescanai-provider gemini`; `GOOGLE_API_KEY` works too) |
 | `CODESCANAI_PROVIDER` | CodeScanAI provider (or `--codescanai-provider`): `auto`, `openai`, `gemini`, `custom` |
@@ -130,7 +153,12 @@ uv run secscan repo list                  # show explicit targets
 uv run secscan repo remove octo/webapp    # remove a target
 uv run secscan scan octo/webapp           # clone + review one remote repo on demand
 uv run secscan scan octo/webapp --branch develop   # review a specific branch
-uv run secscan review ./some/local/repo   # review one local dir (no GitHub)
+uv run secscan scan https://github.com/octo/webapp # the same, given as a URL (GITHUB_TOKEN or the App)
+uv run secscan review ./some/local/repo   # review one local dir you already cloned (no GitHub)
+uv run secscan review ./some/local/repo --fix      # …and write the proposed fixes as fixes.patch
+uv run secscan scan octo/webapp --create-fix-prs   # review, fix, push a branch, open a pull request
+uv run secscan scan octo/webapp --create-fix-prs --dry-run   # same, but only say what PR it would open
+uv run secscan review ./repo --store-db --create-fix-prs     # PR from a local clone (uses its 'origin')
 uv run secscan review ./some/local/repo --store-db   # …and record it in the state DB
 uv run secscan skills list                # bundled security skill packs for --skill
 uv run secscan scan octo/webapp --skill false-positive-filter --skill owasp-top10   # sharper review
@@ -149,15 +177,20 @@ uv run secscan push-to-secman --dry-run                    # preview only
 uv run secscan scan octo/webapp --push-to-secman           # review and push, in one step
 uv run secscan run --targets-only --push-to-secman         # same for a whole run
 uv run secscan run --dry-run                               # no issues opened, nothing pushed to secman
+uv run secscan scan octo/webapp --engine codex             # review with the OpenAI Codex CLI
+uv run secscan scan octo/webapp --engine kimi-cli          # review with the Kimi Code CLI
+uv run secscan scan octo/webapp --provider openrouter --model anthropic/claude-sonnet-5   # Claude Code via OpenRouter
+uv run secscan scan octo/webapp --provider usecc           # Claude Code via your claude.ai login
 uv run secscan scan octo/webapp --engine codescanai        # review with CodeScanAI (OpenAI key in OPENAI_API_KEY)
 uv run secscan review ./repo --engine codescanai --codescanai-provider custom \
     --codescanai-host http://localhost --codescanai-port 11434 --codescanai-endpoint /v1 --model llama3   # local Ollama
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---engine --model --provider --skill --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-ssl --no-db --store-db --create-issues --push-to-secman --secman-url --secman-username --dry-run --issue-prefix --keep-clones
+--engine --model --provider --skill --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-ssl --no-db --store-db --create-issues --fix --create-fix-prs --pr-draft --pr-prefix --push-to-secman --secman-url --secman-username --dry-run --issue-prefix --keep-clones
 --branch --no-resume --limit --targets-only --repos-file --github-api-url --org-repos
---format --output --no-csv --codescanai-provider --codescanai-host --codescanai-port
+--format --output --no-csv --codex-bin --codex-arg --kimi-bin --kimi-arg
+--codescanai-provider --codescanai-host --codescanai-port
 --codescanai-endpoint --codescanai-bin --codescanai-arg --codescanai-default-severity`.
 (`DB_PASSWORD`/`SECMAN_PASSWORD`/`CODESCANAI_TOKEN` are env-only — there is no
 `--db-password`/`--secman-password`/`--codescanai-token` flag.)
@@ -175,6 +208,14 @@ line is then just `owner/name` and size, and nothing is written to the DB.
 `run` and `scan` record the same two columns for every repo they clone, read from the
 clone itself (`git log -1`), so they cost no extra API calls and reflect the branch
 actually reviewed.
+
+`scan` takes the repository as `owner/name` or as a URL — `https://github.com/owner/name`,
+`https://github.com/owner/name.git`, `git@github.com:owner/name.git`. A URL on a GitHub
+Enterprise host (`https://ghes.example.com/owner/name`) also selects that deployment,
+as if `--github-api-url https://ghes.example.com` had been passed. Cloning uses the
+GitHub App installation that owns the repo, or `GITHUB_TOKEN` when the App is not
+installed there — so a one-off scan of any repository a token can read is
+`GITHUB_TOKEN=ghp_… secscan scan https://github.com/owner/name`.
 
 `--branch` (on `run` and `scan`) selects the branch to clone and review. Without it,
 each repo's default branch is used (whatever GitHub reports as HEAD — `main` for most
@@ -237,8 +278,8 @@ bundled ones were derived, and how to write your own:
 
 ## Dry run
 
-`--dry-run` (on `run`, `scan`, and `push-to-secman`) guarantees the command makes
-**no external writes**:
+`--dry-run` (on `run`, `scan`, `review`, and `push-to-secman`) guarantees the command
+makes **no external writes**:
 
 * **No GitHub issue is ever opened.** With `--create-issues`, the run prints what
   it *would* create or skip and makes zero GitHub API calls and zero
@@ -250,6 +291,10 @@ bundled ones were derived, and how to write your own:
   `scan`/`run --push-to-secman --dry-run` — list what they would push without
   logging in or calling `cli-add` even once; because they never contact secman,
   they don't need `SECMAN_URL`/`SECMAN_USERNAME`/`SECMAN_PASSWORD` to be set at all.
+* **No branch is pushed and no pull request is opened.** With `--create-fix-prs`, the
+  fix agent still runs and `fixes.patch` is still written locally, but the run only
+  prints the branch name and base it *would* push and open a PR for — zero `git push`,
+  zero GitHub API calls, nothing recorded in the PR ledger.
 
 Set `SECSCAN_DRY_RUN=1` (or `true`/`yes`/`on`) to force it for every command in
 an environment — useful in CI or a shared shell where an accidental real write
@@ -262,15 +307,17 @@ SECSCAN_DRY_RUN=1 uv run secscan run --create-issues   # same, via the environme
 ```
 
 The promise is enforced, not just documented: dry-run arms a process-wide guard
-(`secscan/dryrun.py`), and every call that would open an issue or reach secman
-checks it first, raising `DryRunViolation` rather than performing the write. In a
+(`secscan/dryrun.py`), and every call that would open an issue, push a fix branch, open
+a pull request, or reach secman checks it first, raising `DryRunViolation` rather than
+performing the write. In a
 correct dry run the guard never fires — it's there so a future refactor that
 forgets to honour the flag fails loudly instead of silently filing issues.
 
 What `--dry-run` does **not** suppress: the security review itself still runs (and
-still costs model tokens), `findings.csv` and the scan/findings state in the DB are
+still costs model tokens), so does the fix step of `--fix`/`--create-fix-prs` (its
+patch is a local artifact like `findings.csv`), the scan/findings state in the DB is
 still written, and `--email-to` still sends the report. It scopes exactly to the
-two outward-facing integrations above.
+three outward-facing integrations above.
 
 ## Authentication: GitHub App vs PAT
 
@@ -435,6 +482,68 @@ gets the `secscan` label, which is not configurable.
 require re-approval after this permission is added to the App manifest. PAT mode
 already covers this via the `repo` scope.
 
+## Fixing findings (`--fix` and `--create-fix-prs`)
+
+Reviewing tells you what is wrong; `--fix` asks the same engine to put it right.
+After the review, the agent is sent back into the repository with file-editing tools
+and the High/Critical findings as its task; the resulting change is captured with
+`git diff` and written as `<output-dir>/<owner>__<repo>/fixes.patch` (plus a
+`fixes.json` with the finding fingerprints, the changed files and the agent's own
+per-finding summary). `--create-fix-prs` (which implies `--fix`) additionally commits
+that diff on a `secscan/fix-<key>` branch, pushes it, and opens **one pull request per
+repository** against the branch that was reviewed.
+
+```bash
+uv run secscan scan octo/webapp --fix                        # patch only, nothing pushed
+uv run secscan scan octo/webapp --create-fix-prs             # patch + branch + pull request
+uv run secscan scan octo/webapp --create-fix-prs --dry-run   # preview the PR, push nothing
+uv run secscan run --org my-org --create-fix-prs --pr-draft  # every repo in scope, PRs as drafts
+uv run secscan review ./webapp --fix                         # local checkout: patch under output/local__webapp/
+uv run secscan review ./webapp --store-db --create-fix-prs   # local checkout: PR on its GitHub 'origin'
+git -C ./webapp apply output/local__webapp/fixes.patch       # …or apply the patch yourself
+```
+
+What the fix step can and cannot do:
+
+* **It edits, it does not execute.** The Claude engine gains `Edit`/`Write` and keeps
+  `Bash` denied; the Kimi engine's agent spec adds only its two file-writing tools;
+  Codex runs in its `workspace-write` sandbox with network off. None of them can run
+  the project's build or tests, so **a fix PR is a proposal for a human reviewer**, and
+  its description says so. `--engine codescanai` cannot fix (it only reports).
+* **It never edits your working copy.** `scan`/`run` fix the disposable clone in
+  place. `review ./dir` clones the directory (or copies it, if it is not a git repo)
+  into a temp workspace, fixes that, and deletes it afterwards — only the patch
+  survives. The clone is of the committed HEAD, so uncommitted changes are not part
+  of the fix (a warning says so).
+* **One PR per set of findings.** The PR is keyed by the fingerprints of the findings
+  it addresses (`fix_key` in `fixes.json`, `fix_prs` table in the state DB). A re-scan
+  with the same High/Critical findings skips the fix step and the PR entirely; once a
+  fix merges and the finding set changes, the next scan opens a new PR. That ledger is
+  why `--create-fix-prs` needs the DB (`--no-db` is an error; on `review`, pass
+  `--store-db`). `stats reset` keeps it, like the issue ledger.
+* **The base branch** is the one reviewed: `--branch` if given, else the repository's
+  default branch (the shallow clone's HEAD); for `review ./dir`, the branch currently
+  checked out there. The PR targets it; the fix branch is pushed with the same
+  token-in-environment mechanism the clone uses, never with the token on argv.
+* **Titles** are `<prefix> fix <n> critical and <m> high security findings` (or
+  `fix high: <title>` for a single finding); `--pr-prefix` changes the prefix (default
+  `secscan:`, empty string for none), `--pr-draft` opens drafts (draft PRs are not
+  available on every GitHub plan — GitHub returns an error, the outcome is reported as
+  failed, and the pushed branch stays for a manual PR).
+
+**Prerequisites:** the GitHub App needs **Contents: Write** and **Pull requests:
+Write** (existing installations must re-approve after the permission change); a PAT
+needs the `repo` scope. A fix that touches `.github/workflows/` additionally needs
+**Workflows: Write** / the `workflow` scope, or GitHub rejects the push — the run
+reports the rejection and moves on. `review ./dir --create-fix-prs` requires the
+directory's `origin` remote to point at the configured GitHub host (`https://…` or
+`git@…:` forms both work) and `HEAD` to be on a branch.
+
+Cost: the fix run is a second agent session over the repository, typically comparable
+to the review; `--max-turns`, `--max-cost-usd` and `--timeout` apply to it as well.
+More detail — the prompts, what the agent is told not to do, and how to review a
+fix PR — in [docs/FIX_PRS.md](docs/FIX_PRS.md).
+
 ## Push findings to secman
 
 `secscan push-to-secman` pushes every High/Critical finding currently in the
@@ -544,15 +653,83 @@ the review step. Everything around it — enumeration, cloning, `findings.csv`, 
 state DB, `--create-issues`, `--push-to-secman`, `--email-to`, `stats`, `report` —
 is engine-agnostic and behaves identically.
 
-| `--engine` | Reviewer | Configured by |
-|---|---|---|
-| `claude` (default) | Claude Code via the Claude Agent SDK: an autonomous, read-only agent that explores the repository with `Read`/`Grep`/`Glob` and emits secscan's JSON findings contract | `--provider`, `--model`, `--skill`, `--max-turns`, `--max-cost-usd` — see [Choosing a provider](#choosing-a-provider---provider) |
-| `codescanai` | [CodeScanAI](https://github.com/codescan-ai/codescan): an open-source CLI that sends each file to an LLM (OpenAI, Gemini, or an OpenAI-compatible server) one at a time and reports the vulnerabilities it finds | `--codescanai-provider`, `--model`, `--codescanai-host/-port/-endpoint`, `--codescanai-bin`, `--codescanai-arg`, `--codescanai-default-severity`, and the `CODESCANAI_*` environment variables |
+| `--engine` | Reviewer | Fix (`--fix`) | Configured by |
+|---|---|---|---|
+| `claude` (default) | Claude Code via the Claude Agent SDK: an autonomous, read-only agent that explores the repository with `Read`/`Grep`/`Glob` and emits secscan's JSON findings contract | yes — `Edit`/`Write`, still no `Bash` | `--provider`, `--model`, `--skill`, `--max-turns`, `--max-cost-usd` — see [Choosing a provider](#choosing-a-provider---provider) |
+| `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) (`codex exec`), OpenAI's terminal agent, in its read-only OS sandbox | yes — `workspace-write` sandbox, network off | `--model` (Codex model ID), `--skill`, `--codex-bin`, `--codex-arg`, `CODEX_*` env, `OPENAI_API_KEY` or `codex login` |
+| `kimi-cli` | [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) (`kimi --print`), Moonshot AI's terminal agent, with a secscan-supplied agent spec limited to `ReadFile`/`Glob`/`Grep` | yes — adds `WriteFile`/`StrReplaceFile` only | `--model` (Moonshot model ID), `--skill`, `--kimi-bin`, `--kimi-arg`, `KIMI_*` env, `KIMI_API_KEY`/`MOONSHOT_API_KEY` or `kimi login` |
+| `codescanai` | [CodeScanAI](https://github.com/codescan-ai/codescan): an open-source CLI that sends each file to an LLM (OpenAI, Gemini, or an OpenAI-compatible server) one at a time and reports the vulnerabilities it finds | no | `--codescanai-provider`, `--model`, `--codescanai-host/-port/-endpoint`, `--codescanai-bin`, `--codescanai-arg`, `--codescanai-default-severity`, and the `CODESCANAI_*` environment variables |
 
-Flags that belong to the other engine are configuration errors rather than silently
-ignored (`--skill` or a non-default `--provider` with `codescanai`; any
-`--codescanai-*` flag with `claude`). `CODESCANAI_*` environment variables are never
-an error, so they can be exported process-wide.
+Flags that belong to another engine are configuration errors rather than silently
+ignored (a non-default `--provider` with anything but `claude`; `--skill` or `--fix`
+with `codescanai`; any `--codescanai-*`, `--codex-*` or `--kimi-*` flag with a different
+engine). `CODESCANAI_*`, `CODEX_*` and `KIMI_*` environment variables are never an error,
+so they can be exported process-wide. Every engine is checked before anything is
+cloned — executable on `PATH`, a credential present — so a misconfigured engine fails
+in seconds, not after a clone.
+
+### Using the Codex CLI
+
+```bash
+npm install -g @openai/codex
+export OPENAI_API_KEY=sk-…         # or: codex login  (ChatGPT account; stored in ~/.codex/auth.json)
+uv run secscan scan octo/webapp --engine codex
+uv run secscan review ./repo --engine codex --model gpt-5.4 --skill owasp-top10
+uv run secscan run --org my-org --engine codex --create-fix-prs
+```
+
+secscan runs `codex exec` non-interactively over the clone with its own prompt (the
+same persona, rubric and JSON contract as the Claude engine, plus any `--skill`
+packs, all in one prompt since `exec` has no separate system prompt) and reads the
+agent's final message back through `-o`. `--model` is a Codex/OpenAI model ID; left
+at the default alias, Codex's own default model applies, and `CODEX_MODEL` changes
+that. Anything else Codex can be configured with — reasoning effort, a custom
+`model_provider` from `~/.codex/config.toml` (Codex's route to OpenRouter and other
+OpenAI-compatible endpoints), `--oss` for a local Ollama/LM Studio model — is passed
+through verbatim with `--codex-arg`, e.g. `--codex-arg=-c
+--codex-arg=model_reasoning_effort=high`.
+
+What is pinned, and why: `--sandbox read-only` for reviews and `workspace-write`
+(network off, `.git/` protected) for fixes; approvals never; `-c
+project_doc_max_bytes=0` so the scanned repository's `AGENTS.md` is **not** loaded
+into the agent's instructions; `--ephemeral` and `--skip-git-repo-check`. Unlike the
+Claude and Kimi engines, Codex keeps its shell tool: the model can run commands, but
+only inside Codex's OS-level sandbox (Landlock/bubblewrap on Linux, Seatbelt on
+macOS — install `bubblewrap` on Linux for the native sandbox). That is weaker
+isolation than a tool-restricted agent; prefer the Claude engine for repositories you
+do not trust, or run Codex reviews in a throwaway container. The subprocess sees a
+minimal environment: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, proxy and CA
+settings, nothing else. Tested with Codex CLI 0.153.
+
+### Using the Kimi Code CLI
+
+```bash
+uv tool install kimi-cli            # Python 3.12+
+export KIMI_API_KEY=sk-…            # Kimi Code platform; or MOONSHOT_API_KEY for the Moonshot open platform; or: kimi login
+uv run secscan scan octo/webapp --engine kimi-cli
+uv run secscan review ./repo --engine kimi-cli --model kimi-k2.7-code --fix
+```
+
+Not to be confused with `--provider kimi`, which bills *Claude Code* through
+Moonshot's Anthropic-compatible endpoint; `--engine kimi-cli` runs Moonshot's own
+agent. secscan hands it an agent specification (`--agent-file`) with secscan's
+system prompt and an explicit tool list — `ReadFile`/`Glob`/`Grep` for reviews, plus
+`WriteFile`/`StrReplaceFile` for fixes; no `Shell`, no web tools, no sub-agents — and
+the task (with any `--skill` packs) on stdin, reading the result from its
+`stream-json` output. The repository's `AGENTS.md`, its `.kimi/`/`.claude/`/`.agents/`
+skills and your global MCP servers are all kept out of the run.
+
+Credentials: with `KIMI_API_KEY` set, the Kimi Code platform
+(`https://api.kimi.com/coding/v1`, default model `kimi-for-coding`) is used; with
+`MOONSHOT_API_KEY`, the Moonshot open platform (`https://api.moonshot.ai/v1`, default
+model `kimi-k2.7-code`; set `KIMI_CLI_BASE_URL=https://api.moonshot.cn/v1` for the
+mainland-China host). The key reaches Kimi through its own `KIMI_API_KEY` environment
+override of an inline provider config whose `api_key` is empty, so it is never on the
+command line. `KIMI_MODEL` changes what the default `--model` alias resolves to (shared
+with `--provider kimi`). With neither key, the model you selected with `kimi login`
+is used, and `--model` then names a model alias from Kimi's own config. Extra Kimi
+flags pass through with `--kimi-arg` (e.g. `--kimi-arg=--thinking`). Tested with
+kimi-cli 1.50.
 
 ### Using CodeScanAI
 
@@ -688,8 +865,19 @@ uv run secscan run --model anthropic/claude-sonnet-4.5
 
 Note: with OpenRouter, `--model` takes an **OpenRouter slug** such as
 `anthropic/claude-sonnet-4.5` — aliases like `sonnet` only work against Anthropic
-directly. The Claude Code CLI still needs to be installed; only its
-`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` are overridden for the review subprocess.
+directly (the default `sonnet` alias maps to `anthropic/claude-sonnet-5`). The Claude
+Code CLI still needs to be installed; only its environment is overridden for the
+review subprocess, following OpenRouter's own Claude Code integration recipe:
+`ANTHROPIC_BASE_URL=https://openrouter.ai/api`, `ANTHROPIC_AUTH_TOKEN=<your key>`,
+`ANTHROPIC_API_KEY` blanked. Claude Code also calls a "small fast" model (Haiku) in
+the background, and every one of those calls is pinned as well —
+`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_SONNET_MODEL`/`ANTHROPIC_DEFAULT_OPUS_MODEL` to
+your `--model`, `ANTHROPIC_SMALL_FAST_MODEL`/`ANTHROPIC_DEFAULT_HAIKU_MODEL` to
+`anthropic/claude-haiku-4.5` (override with `OPENROUTER_SMALL_MODEL`) — so no request
+ever leaves with an alias OpenRouter does not know. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+is set for the subprocess too, since a gateway does not serve the CLI's update and
+telemetry endpoints. The same pinning applies to the `kimi` and `copilot` providers
+(there the small model defaults to your main model).
 
 ### Using Kimi (Moonshot)
 
@@ -740,7 +928,10 @@ uv run secscan scan --provider usecc --model sonnet octo/webapp
 ```
 
 With `usecc`, `--model` takes bare Anthropic aliases (`sonnet`, `opus`, …), the same
-as plain `anthropic`.
+as plain `anthropic`. Both keep working when your login lives outside `~/.claude`:
+`CLAUDE_CONFIG_DIR` is forwarded to the review subprocess, as are proxy and CA
+variables (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`), while
+everything else in secscan's environment is withheld from it.
 
 ## Email reports
 
@@ -845,10 +1036,12 @@ clears the stats for everyone using it.
 ```
 output/
   <owner>__<repo>/findings.csv   # High + Critical findings for that repo
+  <owner>__<repo>/fixes.patch    # unified diff of the proposed fixes (--fix / --create-fix-prs)
+  <owner>__<repo>/fixes.json     # finding fingerprints, changed files, the fix agent's summary
   <owner>__<repo>/codescanai-report.md   # CodeScanAI's raw report (--engine codescanai only)
   summary.csv                    # one row per repo: counts, status, cost, duration
   users.csv                      # org members + repo collaborators (secscan list-users)
-  secscan.sqlite3                # state + findings + targets + issue tracking + users (unless --db-url)
+  secscan.sqlite3                # state + findings + targets + issue/PR tracking + users (unless --db-url)
   _clones/                       # working clones, deleted after each review unless --keep-clones
 ```
 
@@ -859,9 +1052,9 @@ uv run pytest            # full offline suite (no network, no credentials needed
 uv run pytest -v tests/test_emailer.py        # e.g. one module
 ```
 
-Tests never hit the network: the Claude Agent SDK, PyGithub, SMTP, and the
-`codescanai` CLI (a stub script that reproduces its output format) are replaced with
-fakes. MySQL/MariaDB integration tests are skipped unless
+Tests never hit the network: the Claude Agent SDK, PyGithub, SMTP, git pushes, and
+the `codescanai`, `codex` and `kimi` CLIs (stub scripts that reproduce each one's
+output format) are replaced with fakes. MySQL/MariaDB integration tests are skipped unless
 `SECSCAN_TEST_MYSQL_URL` is set (see above).
 
 The [dry-run](#dry-run) guard is process-wide state, so `tests/conftest.py` disarms
@@ -879,4 +1072,7 @@ not change what the suite exercises.
 - The reviewer cannot run scanners: known-CVE dependency checks, high-recall secret
   scanning and rule-based SAST belong to `osv-scanner`, `gitleaks`, Semgrep and
   friends — see [docs/SECURITY_SKILLS.md](docs/SECURITY_SKILLS.md#gaps-a-skill-cannot-close).
-- For stronger isolation, run reviews inside a throwaway network-less container.
+- The fix step cannot run the project's tests — every fix PR needs a human review
+  (see [Fixing findings](#fixing-findings---fix-and---create-fix-prs)).
+- For stronger isolation, run reviews inside a throwaway network-less container —
+  especially with `--engine codex`, whose agent keeps a (sandboxed) shell.

@@ -14,14 +14,14 @@ import typer
 from github import Auth, Github
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from . import codescanai, dryrun
+from . import codescanai, codex, dryrun, fixer, kimi_cli, pull_requests
 from .cloner import CloneError, cleanup, clone_repo, head_commit
 from .config import DEFAULT_API_URL, RunConfig
-from .findings import write_findings_csv, write_summary_csv
+from .findings import Finding, write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
 from .github_auth import AuthContext, build_auth, resolve_target
 from .issues import process_finding
-from .providers import ProviderEnv, model_hint, resolve_model, resolve_provider
+from .providers import ProviderEnv, model_hint, resolve_model, resolve_provider, with_model_env
 from .report_sender import send_scan_report
 from .reviewer import review_repo
 from .state import StateStore, Status
@@ -128,11 +128,22 @@ def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
             f"{cs.model or 'provider default'}."
         )
         return ProviderEnv(name=codescanai.ENGINE_NAME)
+    if cfg.engine in (codex.ENGINE_NAME, kimi_cli.ENGINE_NAME):
+        engine_cfg = cfg.codex if cfg.engine == codex.ENGINE_NAME else cfg.kimi
+        typer.echo(
+            f"Reviews run by {engine_cfg.endpoint_label}, model "
+            f"{engine_cfg.model or 'engine default'}."
+        )
+        if cfg.skills:
+            typer.echo("Skills: " + ", ".join(s.name for s in cfg.skills))
+        return ProviderEnv(name=cfg.engine)
     provider_env = resolve_provider(cfg.provider)
     if provider_env.name != "anthropic":
         where = f" ({provider_env.endpoint})" if provider_env.endpoint else ""
         typer.echo(f"Reviews routed through {provider_env.name}{where}.")
     cfg.model = resolve_model(provider_env, cfg.model)
+    # Gateways need every model the CLI may call pinned to a slug they serve.
+    provider_env = with_model_env(provider_env, cfg.model)
     hint = model_hint(provider_env, cfg.model)
     if hint:
         typer.echo(hint)
@@ -153,6 +164,14 @@ async def _review(
             idle_timeout_s=cfg.timeout_s,
             report_path=out_dir / codescanai.REPORT_FILENAME,
         )
+    if cfg.engine == codex.ENGINE_NAME:
+        return await codex.review_repo(
+            path, full_name, cfg=cfg.codex, idle_timeout_s=cfg.timeout_s, skills=cfg.skills,
+        )
+    if cfg.engine == kimi_cli.ENGINE_NAME:
+        return await kimi_cli.review_repo(
+            path, full_name, cfg=cfg.kimi, idle_timeout_s=cfg.timeout_s, skills=cfg.skills,
+        )
     return await review_repo(
         path, full_name,
         model=cfg.model,
@@ -162,6 +181,80 @@ async def _review(
         idle_timeout_s=cfg.timeout_s,
         skills=cfg.skills,
     )
+
+
+def _gh_repo_factory(token: str, full_name: str, api_url: str):
+    """Deferred PyGithub client: only built outside dry-run, on a worker thread."""
+    def factory():
+        return Github(auth=Auth.Token(token), base_url=api_url).get_repo(full_name)
+    return factory
+
+
+async def _maybe_fix(
+    cfg: RunConfig,
+    workspace: Path,
+    full_name: str,
+    findings: list[Finding],
+    provider_env: ProviderEnv,
+    out_dir: Path,
+    *,
+    store: StateStore | None,
+    repo: RepoInfo | None = None,
+    token: str | None = None,
+    base_branch: str = "",
+    api_url: str = DEFAULT_API_URL,
+) -> pull_requests.FixPrOutcome | None:
+    """Run the fix step over `workspace` (already a disposable git checkout) and,
+    with --create-fix-prs, push it as a pull request on `repo`.
+
+    Returns the PR outcome, or None when no PR step ran. Never raises for a failed
+    fix or PR — the review result is already persisted by the time this runs, and a
+    fix that could not be produced must not turn a successful scan into a failure.
+    """
+    if not cfg.fix or not findings:
+        return None
+    want_pr = cfg.create_fix_prs and store is not None and repo is not None
+
+    key = fixer.fix_key(findings)
+    if want_pr:
+        existing = store.find_fix_pr(repo.owner, repo.name, key)
+        if existing:
+            typer.echo(f"    fix PR: skipped, already open for these findings: {existing.pr_url}")
+            return pull_requests.FixPrOutcome(
+                "skipped", pr_url=existing.pr_url, branch=existing.branch,
+                reason="a pull request for these findings already exists",
+            )
+
+    typer.echo(f"    fixing {len(findings)} High/Critical finding(s) …")
+    result = await fixer.fix_findings(cfg, workspace, full_name, findings, provider_env)
+    patch_path, _ = fixer.write_artifacts(out_dir, result)
+    if result.error:
+        typer.echo(f"    ! fix error: {result.error}")
+    typer.echo(
+        f"    fix: {len(result.changed_files)} file(s) changed, "
+        f"{len(result.fixed_titles)} finding(s) reported fixed (${result.cost_usd:.3f}) — {patch_path}"
+    )
+    if not want_pr:
+        return None
+
+    outcome = await pull_requests.create_fix_pr(
+        workspace=workspace, repo=repo, base_branch=base_branch, token=token or "",
+        store=store, result=result, dry_run=cfg.dry_run, prefix=cfg.pr_prefix,
+        draft=cfg.pr_draft,
+        gh_repo_factory=_gh_repo_factory(token or "", repo.full_name, api_url),
+    )
+    if outcome.action == "created":
+        typer.echo(f"    fix PR: created {outcome.pr_url} ({outcome.branch} → {base_branch})")
+    elif outcome.action == "would_create":
+        typer.echo(
+            f"    fix PR: would push {outcome.branch} and open a pull request into "
+            f"{base_branch} ({len(result.changed_files)} files)"
+        )
+    elif outcome.action == "no_changes":
+        typer.echo("    fix PR: nothing to open, the fix agent changed no files")
+    elif outcome.action == "failed":
+        typer.echo(f"    ! fix PR failed: {outcome.reason}")
+    return outcome
 
 
 async def _process_repo(
@@ -199,6 +292,17 @@ async def _process_repo(
                 verb = "would create" if cfg.dry_run else "created"
                 skip_verb = "would skip" if cfg.dry_run else "skipped"
                 typer.echo(f"    issues: {verb} {created}, {skip_verb} {skipped}")
+
+            if cfg.fix and res.high_critical:
+                # The clone is disposable, so the fixer edits it in place. The
+                # base branch is what was actually checked out — --branch, or the
+                # remote HEAD the shallow clone followed.
+                base_branch = cfg.branch or await fixer.current_branch(path) or repo.default_branch
+                await _maybe_fix(
+                    cfg, path, repo.full_name, res.high_critical, provider_env, repo_out,
+                    store=store, repo=repo, token=token, base_branch=base_branch,
+                    api_url=auth.host.api_url,
+                )
 
             if res.error and not res.findings:
                 if store is not None:
@@ -408,9 +512,62 @@ async def review_local(cfg: RunConfig, path: Path) -> None:
         if store is not None:
             summary = write_summary_csv(cfg.output_dir / "summary.csv", store.all_records())
             typer.echo(f"  Stored as {full_name}; summary={summary}")
+
+        if cfg.fix and res.high_critical:
+            await _fix_local(cfg, path, full_name, res.high_critical, provider_env, repo_out, store)
     finally:
         if store is not None:
             store.close()
+
+
+async def _fix_local(
+    cfg: RunConfig, path: Path, full_name: str, findings: list[Finding],
+    provider_env: ProviderEnv, repo_out: Path, store: StateStore | None,
+) -> None:
+    """The fix step for `review`: never edits `path` itself.
+
+    The fixer works on a fresh clone (or copy) under a temp directory; with
+    --create-fix-prs the directory's `origin` must point at a repository on the
+    configured GitHub host, and the PR targets the branch currently checked out.
+    """
+    repo = token = None
+    base_branch = ""
+    api_url = DEFAULT_API_URL
+    if cfg.create_fix_prs:
+        auth = build_auth(cfg.github_api_url)
+        api_url = auth.host.api_url
+        remote = pull_requests.parse_github_remote(await pull_requests.origin_url(path), auth.host)
+        if remote is None:
+            typer.echo(
+                "  ! --create-fix-prs: the directory has no 'origin' remote on "
+                f"{auth.host.web_url}; writing fixes.patch only"
+            )
+        else:
+            owner, name = remote
+            repo = await asyncio.to_thread(resolve_target, owner, name, auth)
+            token = await _mint_token(auth, repo)
+            base_branch = await fixer.current_branch(path)
+            if not base_branch:
+                typer.echo("  ! --create-fix-prs: HEAD is detached; cannot pick a base branch")
+                repo = None
+            elif await fixer.has_uncommitted_changes(path):
+                typer.echo(
+                    "  warning: the directory has uncommitted changes; the fix is based on "
+                    "its committed HEAD and they are not part of it"
+                )
+
+    root = fixer.temp_workspace_root()
+    try:
+        typer.echo(f"  preparing fix workspace under {root} …")
+        workspace = await fixer.prepare_workspace(path, root, path.name)
+        await _maybe_fix(
+            cfg, workspace, full_name, findings, provider_env, repo_out,
+            store=store, repo=repo, token=token, base_branch=base_branch, api_url=api_url,
+        )
+    except fixer.FixError as exc:
+        typer.echo(f"  ! fix workspace error: {exc}")
+    finally:
+        cleanup(root)  # the patch under --output-dir is the durable copy
 
 
 async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:

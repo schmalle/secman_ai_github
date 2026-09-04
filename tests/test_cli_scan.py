@@ -1,3 +1,4 @@
+import pytest
 from typer.testing import CliRunner
 
 from secscan.cli import app
@@ -392,3 +393,57 @@ def test_run_skill_flag_reaches_config(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert [s.name for s in captured["cfg"].skills] == ["llm-app-security"]
+
+
+# --- repository URLs -------------------------------------------------------------------
+
+
+def _capture_scan(monkeypatch):
+    import secscan.orchestrator
+
+    captured = {}
+
+    async def fake_scan_repo(cfg, owner, name):
+        captured["cfg"] = cfg
+        captured["target"] = (owner, name)
+
+    monkeypatch.setattr(secscan.orchestrator, "scan_repo", fake_scan_repo)
+    return captured
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["https://github.com/octo/demo", "https://github.com/octo/demo.git", "git@github.com:octo/demo.git",
+     "https://www.github.com/octo/demo/"],
+)
+def test_scan_accepts_github_urls(tmp_path, monkeypatch, ref):
+    captured = _capture_scan(monkeypatch)
+    result = runner.invoke(app, ["scan", ref, "--output-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert captured["target"] == ("octo", "demo")
+    assert captured["cfg"].github_api_url is None
+
+
+def test_scan_enterprise_url_implies_github_api_url(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+    captured = _capture_scan(monkeypatch)
+    result = runner.invoke(app, ["scan", "https://ghes.example.com/octo/demo", "--output-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert captured["target"] == ("octo", "demo")
+    assert captured["cfg"].github_api_url == "https://ghes.example.com"
+
+
+def test_scan_explicit_api_url_wins_over_url_host(tmp_path, monkeypatch):
+    captured = _capture_scan(monkeypatch)
+    result = runner.invoke(
+        app, ["scan", "git@ghes.example.com:octo/demo.git", "--output-dir", str(tmp_path),
+              "--github-api-url", "https://api.acme.ghe.com"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].github_api_url == "https://api.acme.ghe.com"
+
+
+def test_scan_rejects_malformed_urls(tmp_path):
+    for bad in ("https://github.com/octo", "https://github.com/a/b/c", "https:///octo/demo"):
+        result = runner.invoke(app, ["scan", bad, "--output-dir", str(tmp_path)])
+        assert result.exit_code != 0, bad

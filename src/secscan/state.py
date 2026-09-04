@@ -62,6 +62,17 @@ class IssueRecord:
     last_seen_at: str
 
 
+@dataclass
+class FixPrRecord:
+    owner: str
+    repo: str
+    fix_key: str  # hash of the finding fingerprints the PR remediates (see pull_requests.py)
+    pr_number: int
+    pr_url: str
+    branch: str
+    created_at: str
+
+
 # -- schema (per dialect) -------------------------------------------------------
 
 _REPOS_SQLITE = """
@@ -180,6 +191,36 @@ CREATE TABLE IF NOT EXISTS issue_tracking (
 """
 
 
+# One row per fix pull request opened by --create-fix-prs, keyed by the set of
+# finding fingerprints it remediates — the dedup ledger that stops a re-scan from
+# opening a second PR for the same fixes. Kept by `stats reset`, like issue_tracking.
+_FIX_PRS_SQLITE = """
+CREATE TABLE IF NOT EXISTS fix_prs (
+    owner      TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    fix_key    TEXT NOT NULL,
+    pr_number  INTEGER NOT NULL,
+    pr_url     TEXT NOT NULL,
+    branch     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo, fix_key)
+);
+"""
+
+_FIX_PRS_MYSQL = """
+CREATE TABLE IF NOT EXISTS fix_prs (
+    owner      VARCHAR(255) NOT NULL,
+    repo       VARCHAR(255) NOT NULL,
+    fix_key    VARCHAR(64) NOT NULL,
+    pr_number  INTEGER NOT NULL,
+    pr_url     TEXT NOT NULL,
+    branch     VARCHAR(255) NOT NULL DEFAULT '',
+    created_at VARCHAR(64) NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo, fix_key)
+);
+"""
+
+
 _GITHUB_USERS_SQLITE = """
 CREATE TABLE IF NOT EXISTS github_users (
     org        TEXT NOT NULL,
@@ -247,7 +288,7 @@ _SQLITE_DIALECT = _Dialect(
     insert_ignore="INSERT OR IGNORE INTO",
     schema=(
         _REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE, _ISSUE_TRACKING_SQLITE,
-        _GITHUB_USERS_SQLITE,
+        _GITHUB_USERS_SQLITE, _FIX_PRS_SQLITE,
     ),
     migrations=_MIGRATIONS_SQLITE,
 )
@@ -257,7 +298,7 @@ _MYSQL_DIALECT = _Dialect(
     insert_ignore="INSERT IGNORE INTO",
     schema=(
         _REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL, _ISSUE_TRACKING_MYSQL,
-        _GITHUB_USERS_MYSQL,
+        _GITHUB_USERS_MYSQL, _FIX_PRS_MYSQL,
     ),
     migrations=_MIGRATIONS_MYSQL,
 )
@@ -608,6 +649,37 @@ class StateStore:
             "WHERE owner = ? AND repo = ? AND fingerprint = ?",
             (seen_at, owner, repo, fingerprint),
         )
+
+    # -- fix pull request dedup ---------------------------------------------------
+
+    def find_fix_pr(self, owner: str, repo: str, fix_key: str) -> "FixPrRecord | None":
+        cur = self._exec(
+            "SELECT * FROM fix_prs WHERE owner = ? AND repo = ? AND fix_key = ?",
+            (owner, repo, fix_key),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return FixPrRecord(
+            owner=row["owner"], repo=row["repo"], fix_key=row["fix_key"],
+            pr_number=row["pr_number"], pr_url=row["pr_url"],
+            branch=row["branch"] or "", created_at=row["created_at"] or "",
+        )
+
+    def record_fix_pr(
+        self, owner: str, repo: str, fix_key: str,
+        pr_number: int, pr_url: str, branch: str, created_at: str,
+    ) -> None:
+        self._exec(
+            "INSERT INTO fix_prs (owner, repo, fix_key, pr_number, pr_url, branch, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (owner, repo, fix_key, pr_number, pr_url, branch, created_at),
+        )
+
+    def fix_pr_count(self) -> int:
+        """Number of fix pull requests ever opened (tracked for dedup)."""
+        cur = self._exec("SELECT COUNT(*) AS n FROM fix_prs")
+        return cur.fetchone()["n"]
 
     # -- scan targets (explicitly-added repos) ------------------------------------
 

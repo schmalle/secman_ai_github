@@ -101,6 +101,9 @@ them a request; until it is accepted the new permission is not active.
 | Repository → **Contents** | Read | Cloning the repo (required) |
 | Repository → **Metadata** | Read | Listing repos (required; GitHub auto-selects it) |
 | Repository → **Issues** | Write | `--create-issues` only |
+| Repository → **Contents** | Write | `--create-fix-prs` only (pushing the `secscan/fix-…` branch) |
+| Repository → **Pull requests** | Write | `--create-fix-prs` only (opening the PR) |
+| Repository → **Workflows** | Write | `--create-fix-prs` only, and only when a fix touches `.github/workflows/` |
 | Organization → **Members** | Read | `secscan list-users --org` only |
 
 ---
@@ -287,6 +290,7 @@ Errors are quoted as secscan prints them.
 | `the GitHub App has no installation on 'X', so it cannot list its users` | `list-users --org X` where the App is not installed on `X`. | Install it on that org with **Members: Read**. |
 | `no credentials can clone owner/repo — install the GitHub App on 'owner', or set GITHUB_TOKEN` | An explicit target lives on an account no installation covers. | Install the App there, or set `GITHUB_TOKEN`. |
 | `403 Resource not accessible by integration` on `--create-issues` | Missing **Issues: Write**. | Add it, then have the installation owner re-approve. |
+| `fix PR failed: git push failed … 403` or `… could not be opened: 403` on `--create-fix-prs` | Missing **Contents: Write** (push) or **Pull requests: Write** (PR); a push touching `.github/workflows/` also needs **Workflows: Write**. | Add the permission, re-approve the installation; the pushed branch (if any) can be turned into a PR by hand. |
 
 ---
 
