@@ -26,9 +26,16 @@ skill packs — bundled names or paths to Agent-Skills-format directories — to
 reviewer's system prompt. See skills.py and docs/SECURITY_SKILLS.md.
 
 `--engine` (on run / scan / review, or SECSCAN_ENGINE) picks the reviewer: `claude`
-(default; Claude Code via the Agent SDK, routed by --provider/--model) or
+(default; Claude Code via the Agent SDK, routed by --provider/--model), `codex`
+(OpenAI Codex CLI, codex.py), `kimi-cli` (Kimi Code CLI, kimi_cli.py) or
 `codescanai` (the CodeScanAI CLI driven as a subprocess, configured by the
 --codescanai-* flags / CODESCANAI_* env). See codescanai.py.
+
+`--fix` (on run / scan / review) sends the engine back in with editing tools to
+remediate the High/Critical findings and writes the diff as fixes.patch;
+`--create-fix-prs` also pushes it as a branch and opens a pull request (an external
+write: dry-run guarded, deduped through the state DB). See fixer.py and
+pull_requests.py.
 """
 
 from __future__ import annotations
@@ -62,10 +69,46 @@ _MODEL_HELP = (
 
 _ENGINE_HELP = (
     "Which reviewer does the work (or SECSCAN_ENGINE env): claude — Claude Code via the "
-    "Agent SDK (default; --provider/--model/--skill apply) — or codescanai — the "
-    "CodeScanAI CLI (pip install codescanai) run as a subprocess over the same clone, "
-    "configured with --codescanai-* / CODESCANAI_*. Findings from either engine flow "
-    "into the same CSV, state DB, issues, secman push and email report."
+    "Agent SDK (default; --provider/--model/--skill apply); codex — the OpenAI Codex CLI "
+    "(npm install -g @openai/codex; OPENAI_API_KEY or `codex login`); kimi-cli — the Kimi "
+    "Code CLI (uv tool install kimi-cli; KIMI_API_KEY/MOONSHOT_API_KEY or `kimi login`); "
+    "or codescanai — the CodeScanAI CLI (pip install codescanai), configured with "
+    "--codescanai-* / CODESCANAI_*. Findings from every engine flow into the same CSV, "
+    "state DB, issues, fix PRs, secman push and email report."
+)
+_CODEX_BIN_HELP = (
+    "How to invoke the Codex CLI (or CODEX_BIN env); default `codex`. A path or a full "
+    "command line such as 'npx @openai/codex'."
+)
+_CODEX_ARG_HELP = (
+    "Extra argument passed to `codex exec` verbatim (repeatable), e.g. "
+    "--codex-arg=-c --codex-arg=model_reasoning_effort=high. Never put a key here."
+)
+_KIMI_BIN_HELP = (
+    "How to invoke the Kimi CLI (or KIMI_BIN env); default `kimi`. A path or a full "
+    "command line such as 'uvx kimi-cli'."
+)
+_KIMI_ARG_HELP = (
+    "Extra argument passed to `kimi --print` verbatim (repeatable), e.g. "
+    "--kimi-arg=--thinking. Never put a key here."
+)
+_FIX_HELP = (
+    "After the review, send the same engine back in with file-editing tools (still no "
+    "shell, no network) to remediate the High/Critical findings, and write the "
+    "resulting diff as fixes.patch (plus fixes.json) next to findings.csv. Not "
+    "available with --engine codescanai."
+)
+_CREATE_FIX_PRS_HELP = (
+    "Implies --fix; additionally push the fix as a `secscan/fix-…` branch and open one "
+    "pull request per repository against the reviewed branch, deduped by the set of "
+    "findings it addresses (tracked in the state DB — cannot combine with --no-db). "
+    "Needs Contents: Write + Pull requests: Write (App) or the repo scope (PAT). "
+    "--dry-run previews the PR without pushing anything."
+)
+_PR_DRAFT_HELP = "Open fix pull requests as drafts (not available on every GitHub plan)."
+_PR_PREFIX_HELP = (
+    "Prefix for fix pull request titles opened by --create-fix-prs; an empty string "
+    "means no prefix."
 )
 _CODESCANAI_PROVIDER_HELP = (
     "CodeScanAI's AI provider (or CODESCANAI_PROVIDER env): openai (OPENAI_API_KEY), "
@@ -207,6 +250,40 @@ def _split_full_name(value: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
+def _parse_repo_ref(value: str) -> tuple[str, str, str | None]:
+    """Accept 'owner/name' or a repository URL; returns (owner, name, host or None).
+
+    URL forms: https://github.com/owner/name(.git), https://ghes.example.com/owner/name,
+    git@github.com:owner/name.git. The host is returned so a non-github.com URL can
+    imply --github-api-url when the caller did not pass one.
+    """
+    import re
+    from urllib.parse import urlsplit
+
+    value = value.strip()
+    if "://" in value:
+        parts = urlsplit(value)
+        host = parts.netloc.rsplit("@", 1)[-1]
+        path = parts.path
+    elif re.match(r"^[\w.-]+@[\w.-]+:", value):
+        userhost, _, path = value.partition(":")
+        host = userhost.rsplit("@", 1)[-1]
+    else:
+        owner, name = _split_full_name(value)
+        return owner, name, None
+    segments = [seg for seg in path.strip("/").split("/") if seg]
+    if len(segments) != 2 or not host:
+        raise typer.BadParameter(
+            f"expected 'owner/name' or a repository URL like https://github.com/owner/name, got {value!r}"
+        )
+    owner, name = segments
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not owner or not name:
+        raise typer.BadParameter(f"expected 'owner/name' or a repository URL, got {value!r}")
+    return owner, name, host.lower()
+
+
 def _open_store(
     output_dir: Path,
     db_url: str | None,
@@ -264,9 +341,25 @@ def _run_config(
     codescanai_bin: str | None = None,
     codescanai_args: list[str] | None = None,
     codescanai_default_severity: str | None = None,
+    codex_bin: str | None = None,
+    codex_args: list[str] | None = None,
+    kimi_bin: str | None = None,
+    kimi_args: list[str] | None = None,
+    fix: bool = False,
+    create_fix_prs: bool = False,
+    pr_draft: bool = False,
+    pr_prefix: str = "secscan:",
 ) -> RunConfig:
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
+    if create_fix_prs:
+        fix = True
+    if no_db and create_fix_prs:
+        raise ConfigError(
+            "--no-db and --create-fix-prs cannot be combined (pull request dedup needs the DB)"
+        )
+    if pr_draft and not create_fix_prs:
+        raise ConfigError("--pr-draft requires --create-fix-prs")
     if no_db and email_to:
         raise ConfigError("--no-db and --email-to cannot be combined (the report is built from the state DB)")
     if no_db and push_to_secman:
@@ -296,7 +389,7 @@ def _run_config(
         if not dry_run and not (secman_url and secman_username and secman_password):
             raise ConfigError(_SECMAN_CREDS_MISSING)
     loaded_skills = _load_skills(skills)
-    engine, codescanai_cfg = _resolve_engine(
+    engine, engine_cfgs = _resolve_engine(
         engine,
         provider=provider,
         skills=loaded_skills,
@@ -307,7 +400,12 @@ def _run_config(
         codescanai_bin=codescanai_bin,
         codescanai_args=codescanai_args,
         codescanai_default_severity=codescanai_default_severity,
+        codex_bin=codex_bin,
+        codex_args=codex_args,
+        kimi_bin=kimi_bin,
+        kimi_args=kimi_args,
         model=model,
+        fix=fix,
     )
     return RunConfig(
         output_dir=output_dir,
@@ -334,7 +432,13 @@ def _run_config(
         ),
         concurrency=concurrency,
         engine=engine,
-        codescanai=codescanai_cfg,
+        codescanai=engine_cfgs.get("codescanai"),
+        codex=engine_cfgs.get("codex"),
+        kimi=engine_cfgs.get("kimi-cli"),
+        fix=fix,
+        create_fix_prs=create_fix_prs,
+        pr_draft=pr_draft,
+        pr_prefix=pr_prefix.strip(),
         model=model,
         provider=provider,
         max_turns=max_turns,
@@ -365,7 +469,11 @@ def _load_skills(refs: list[str] | None) -> list:
         raise ConfigError(f"--skill: {exc}") from exc
 
 
-_ENGINES = ("claude", "codescanai")
+_ENGINES = ("claude", "codex", "kimi-cli", "codescanai")
+# Engines whose review prompt secscan controls, so --skill packs can be appended.
+_SKILL_ENGINES = ("claude", "codex", "kimi-cli")
+# Engines that can run in write mode for --fix / --create-fix-prs.
+_FIX_ENGINES = ("claude", "codex", "kimi-cli")
 
 
 def _resolve_engine(
@@ -381,14 +489,20 @@ def _resolve_engine(
     codescanai_args: list[str] | None,
     codescanai_default_severity: str | None,
     model: str,
-):
+    codex_bin: str | None = None,
+    codex_args: list[str] | None = None,
+    kimi_bin: str | None = None,
+    kimi_args: list[str] | None = None,
+    fix: bool = False,
+) -> tuple[str, dict]:
     """Resolve --engine (flag, then SECSCAN_ENGINE, then claude) and its settings.
 
-    CodeScanAI settings are resolved up front — API key present, binary installed,
-    host well-formed — so a misconfigured engine fails before any clone or review.
-    Flags that only make sense for the other engine are configuration errors rather
-    than silently ignored; `CODESCANAI_*` environment variables are not, since they
-    are often exported process-wide.
+    Engine settings are resolved up front — API key present, binary installed, host
+    well-formed — so a misconfigured engine fails before any clone or review. Flags
+    that only make sense for another engine are configuration errors rather than
+    silently ignored; `CODESCANAI_*` / `CODEX_*` / `KIMI_*` environment variables are
+    not, since they are often exported process-wide. Returns the engine name and a
+    dict of resolved per-engine configs keyed by engine name.
     """
     import os
 
@@ -396,44 +510,64 @@ def _resolve_engine(
     if engine not in _ENGINES:
         raise ConfigError(f"--engine must be one of {', '.join(_ENGINES)}; got {engine!r}")
 
-    codescanai_flags = {
-        "--codescanai-provider": codescanai_provider,
-        "--codescanai-host": codescanai_host,
-        "--codescanai-port": codescanai_port,
-        "--codescanai-endpoint": codescanai_endpoint,
-        "--codescanai-bin": codescanai_bin,
-        "--codescanai-arg": codescanai_args or None,
-        "--codescanai-default-severity": codescanai_default_severity,
+    engine_flags = {
+        "codescanai": {
+            "--codescanai-provider": codescanai_provider,
+            "--codescanai-host": codescanai_host,
+            "--codescanai-port": codescanai_port,
+            "--codescanai-endpoint": codescanai_endpoint,
+            "--codescanai-bin": codescanai_bin,
+            "--codescanai-arg": codescanai_args or None,
+            "--codescanai-default-severity": codescanai_default_severity,
+        },
+        "codex": {"--codex-bin": codex_bin, "--codex-arg": codex_args or None},
+        "kimi-cli": {"--kimi-bin": kimi_bin, "--kimi-arg": kimi_args or None},
     }
-    given = [flag for flag, value in codescanai_flags.items() if value not in (None, "")]
+    for owner, flags in engine_flags.items():
+        given = [flag for flag, value in flags.items() if value not in (None, "")]
+        if given and engine != owner:
+            raise ConfigError(f"{', '.join(given)} require --engine {owner}")
 
-    if engine != "codescanai":
-        if given:
-            raise ConfigError(f"{', '.join(given)} require --engine codescanai")
-        return engine, None
-
-    if skills:
+    if skills and engine not in _SKILL_ENGINES:
         raise ConfigError(
-            "--skill only applies to --engine claude: CodeScanAI's review prompt is not "
-            "configurable, so a skill pack cannot be added to it"
+            "--skill only applies to --engine claude, codex or kimi-cli: CodeScanAI's "
+            "review prompt is not configurable, so a skill pack cannot be added to it"
         )
-    if provider != "auto":
+    if provider != "auto" and engine != "claude":
         raise ConfigError(
             "--provider selects the endpoint for the Claude Code reviewer and does not "
-            "apply to --engine codescanai; use --codescanai-provider instead"
+            f"apply to --engine {engine}"
+            + ("; use --codescanai-provider instead" if engine == "codescanai" else "")
         )
-    from .codescanai import resolve_config
+    if fix and engine not in _FIX_ENGINES:
+        raise ConfigError(
+            f"--fix/--create-fix-prs are not available with --engine {engine}: it can "
+            "only report findings, not edit files; use --engine claude, codex or kimi-cli"
+        )
 
-    return engine, resolve_config(
-        provider=codescanai_provider,
-        model=model,
-        host=codescanai_host,
-        port=codescanai_port,
-        endpoint=codescanai_endpoint,
-        bin=codescanai_bin,
-        extra_args=codescanai_args,
-        default_severity=codescanai_default_severity,
-    )
+    configs: dict = {}
+    if engine == "codescanai":
+        from .codescanai import resolve_config
+
+        configs["codescanai"] = resolve_config(
+            provider=codescanai_provider,
+            model=model,
+            host=codescanai_host,
+            port=codescanai_port,
+            endpoint=codescanai_endpoint,
+            bin=codescanai_bin,
+            extra_args=codescanai_args,
+            default_severity=codescanai_default_severity,
+        )
+    elif engine == "codex":
+        from .codex import resolve_config
+
+        configs["codex"] = resolve_config(bin=codex_bin, model=model, extra_args=codex_args)
+    elif engine == "kimi-cli":
+        from .kimi_cli import resolve_config
+
+        configs["kimi-cli"] = resolve_config(bin=kimi_bin, model=model, extra_args=kimi_args)
+    return engine, configs
 
 
 def _validate_email_config(cfg: RunConfig) -> None:
@@ -513,6 +647,14 @@ def run(
     codescanai_bin: str = typer.Option(None, "--codescanai-bin", help=_CODESCANAI_BIN_HELP),
     codescanai_arg: list[str] = typer.Option(None, "--codescanai-arg", help=_CODESCANAI_ARG_HELP),
     codescanai_default_severity: str = typer.Option(None, "--codescanai-default-severity", help=_CODESCANAI_DEFAULT_SEVERITY_HELP),
+    codex_bin: str = typer.Option(None, "--codex-bin", help=_CODEX_BIN_HELP),
+    codex_arg: list[str] = typer.Option(None, "--codex-arg", help=_CODEX_ARG_HELP),
+    kimi_bin: str = typer.Option(None, "--kimi-bin", help=_KIMI_BIN_HELP),
+    kimi_arg: list[str] = typer.Option(None, "--kimi-arg", help=_KIMI_ARG_HELP),
+    fix: bool = typer.Option(False, "--fix", help=_FIX_HELP),
+    create_fix_prs: bool = typer.Option(False, "--create-fix-prs", help=_CREATE_FIX_PRS_HELP),
+    pr_draft: bool = typer.Option(False, "--pr-draft", help=_PR_DRAFT_HELP),
+    pr_prefix: str = typer.Option("secscan:", "--pr-prefix", help=_PR_PREFIX_HELP),
 ) -> None:
     """Enumerate, clone, and security-review reachable repositories."""
     import asyncio
@@ -537,6 +679,9 @@ def run(
             codescanai_endpoint=codescanai_endpoint, codescanai_bin=codescanai_bin,
             codescanai_args=codescanai_arg,
             codescanai_default_severity=codescanai_default_severity,
+            codex_bin=codex_bin, codex_args=codex_arg,
+            kimi_bin=kimi_bin, kimi_args=kimi_arg,
+            fix=fix, create_fix_prs=create_fix_prs, pr_draft=pr_draft, pr_prefix=pr_prefix,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:
@@ -776,6 +921,8 @@ def review(
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL (with --store-db); defaults to SECSCAN_DB_URL or local SQLite."),
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env). Overrides any user embedded in --db-url."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env). No custom CA/cert/key."),
+    github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP + " Only used by --create-fix-prs."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --create-fix-prs: preview the pull request without pushing anything. Also settable via SECSCAN_DRY_RUN=1."),
     model: str = typer.Option("sonnet", help=_MODEL_HELP),
     provider: str = typer.Option("auto", help=_PROVIDER_HELP),
     max_turns: int = typer.Option(60),
@@ -792,25 +939,43 @@ def review(
     codescanai_bin: str = typer.Option(None, "--codescanai-bin", help=_CODESCANAI_BIN_HELP),
     codescanai_arg: list[str] = typer.Option(None, "--codescanai-arg", help=_CODESCANAI_ARG_HELP),
     codescanai_default_severity: str = typer.Option(None, "--codescanai-default-severity", help=_CODESCANAI_DEFAULT_SEVERITY_HELP),
+    codex_bin: str = typer.Option(None, "--codex-bin", help=_CODEX_BIN_HELP),
+    codex_arg: list[str] = typer.Option(None, "--codex-arg", help=_CODEX_ARG_HELP),
+    kimi_bin: str = typer.Option(None, "--kimi-bin", help=_KIMI_BIN_HELP),
+    kimi_arg: list[str] = typer.Option(None, "--kimi-arg", help=_KIMI_ARG_HELP),
+    fix: bool = typer.Option(False, "--fix", help=_FIX_HELP),
+    create_fix_prs: bool = typer.Option(False, "--create-fix-prs", help=_CREATE_FIX_PRS_HELP),
+    pr_draft: bool = typer.Option(False, "--pr-draft", help=_PR_DRAFT_HELP),
+    pr_prefix: str = typer.Option("secscan:", "--pr-prefix", help=_PR_PREFIX_HELP),
 ) -> None:
-    """Security-review a single local repository directory."""
+    """Security-review a single local repository directory (already cloned; nothing is
+    fetched). With --fix the fixes are made on a disposable copy, never in place; with
+    --create-fix-prs they are pushed to the directory's GitHub 'origin' as a PR."""
     import asyncio
 
     from .orchestrator import review_local
 
     try:
+        if create_fix_prs and not store_db:
+            raise ConfigError(
+                "--create-fix-prs requires --store-db on review (pull request dedup needs the DB)"
+            )
         cfg = _run_config(
             output_dir, 1, model, max_turns, max_cost_usd,
             False, False, 0, True, True, None,
             db_url=_resolve_db_url(db_url), db_user=_resolve_db_user(db_user),
             db_ssl=_resolve_db_ssl(db_ssl),
-            no_db=not store_db,
+            no_db=not store_db, dry_run=_enter_dry_run(dry_run),
+            github_api_url=github_api_url,
             provider=provider, timeout_s=timeout, skills=skill,
             engine=engine, codescanai_provider=codescanai_provider,
             codescanai_host=codescanai_host, codescanai_port=codescanai_port,
             codescanai_endpoint=codescanai_endpoint, codescanai_bin=codescanai_bin,
             codescanai_args=codescanai_arg,
             codescanai_default_severity=codescanai_default_severity,
+            codex_bin=codex_bin, codex_args=codex_arg,
+            kimi_bin=kimi_bin, kimi_args=kimi_arg,
+            fix=fix, create_fix_prs=create_fix_prs, pr_draft=pr_draft, pr_prefix=pr_prefix,
         )
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
@@ -820,7 +985,10 @@ def review(
 
 @app.command()
 def scan(
-    full_name: str = typer.Argument(..., help="Repository as 'owner/name'."),
+    full_name: str = typer.Argument(
+        ..., help="Repository as 'owner/name', or its URL (https://github.com/owner/name, "
+                  "git@github.com:owner/name.git; a GitHub Enterprise host implies --github-api-url)."
+    ),
     output_dir: Path = typer.Option(Path("output"), help="Where the CSV and state live."),
     github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     db_url: str = typer.Option(None, help="MySQL/MariaDB URL; defaults to SECSCAN_DB_URL or local SQLite."),
@@ -866,6 +1034,14 @@ def scan(
     codescanai_bin: str = typer.Option(None, "--codescanai-bin", help=_CODESCANAI_BIN_HELP),
     codescanai_arg: list[str] = typer.Option(None, "--codescanai-arg", help=_CODESCANAI_ARG_HELP),
     codescanai_default_severity: str = typer.Option(None, "--codescanai-default-severity", help=_CODESCANAI_DEFAULT_SEVERITY_HELP),
+    codex_bin: str = typer.Option(None, "--codex-bin", help=_CODEX_BIN_HELP),
+    codex_arg: list[str] = typer.Option(None, "--codex-arg", help=_CODEX_ARG_HELP),
+    kimi_bin: str = typer.Option(None, "--kimi-bin", help=_KIMI_BIN_HELP),
+    kimi_arg: list[str] = typer.Option(None, "--kimi-arg", help=_KIMI_ARG_HELP),
+    fix: bool = typer.Option(False, "--fix", help=_FIX_HELP),
+    create_fix_prs: bool = typer.Option(False, "--create-fix-prs", help=_CREATE_FIX_PRS_HELP),
+    pr_draft: bool = typer.Option(False, "--pr-draft", help=_PR_DRAFT_HELP),
+    pr_prefix: str = typer.Option("secscan:", "--pr-prefix", help=_PR_PREFIX_HELP),
 ) -> None:
     """Clone one remote repository and security-review it. Locates the App installation
     owning the repo (falling back to the PAT when the App is not installed there)."""
@@ -873,7 +1049,13 @@ def scan(
 
     from .orchestrator import scan_repo
 
-    owner, name = _split_full_name(full_name)
+    owner, name, host = _parse_repo_ref(full_name)
+    if host and host not in ("github.com", "www.github.com") and not github_api_url:
+        import os
+
+        # A URL on an Enterprise host names the deployment; honour it unless the
+        # operator already pointed at one explicitly.
+        github_api_url = os.environ.get("GITHUB_API_URL") or f"https://{host}"
     try:
         cfg = _run_config(
             output_dir, 1, model, max_turns, max_cost_usd,
@@ -892,6 +1074,9 @@ def scan(
             codescanai_endpoint=codescanai_endpoint, codescanai_bin=codescanai_bin,
             codescanai_args=codescanai_arg,
             codescanai_default_severity=codescanai_default_severity,
+            codex_bin=codex_bin, codex_args=codex_arg,
+            kimi_bin=kimi_bin, kimi_args=kimi_arg,
+            fix=fix, create_fix_prs=create_fix_prs, pr_draft=pr_draft, pr_prefix=pr_prefix,
         )
         _validate_email_config(cfg)
     except ConfigError as exc:
@@ -938,6 +1123,7 @@ def _stats_payload(store, top: int) -> dict:
             "cost_usd": round(t["cost"], 3),
         },
         "issues_tracked": store.issue_count(),
+        "fix_prs_tracked": store.fix_pr_count(),
         "last_reviewed_at": store.last_reviewed_at(),
         "top_repos": [
             {
@@ -970,6 +1156,7 @@ def _stats_table(payload: dict) -> str:
         f" ({payload['totals']['failed']} repos failed)",
         f"Review cost:    ${payload['totals']['cost_usd']:.3f}",
         f"Issues tracked: {payload['issues_tracked']}",
+        f"Fix PRs opened: {payload.get('fix_prs_tracked', 0)}",
         f"Last review:    {payload['last_reviewed_at'] or '-'}",
         "",
         "Stored findings by severity:",

@@ -110,3 +110,20 @@ def test_issue_creation_refuses_while_armed(tmp_path):
             _ExplodingRepo(), store, "octo", "demo", finding,
             seen_at="2026-07-12T00:00:00+00:00", dry_run=False,
         )
+
+
+async def test_fix_pr_push_and_open_refuse_while_armed(tmp_path):
+    """--create-fix-prs reaches GitHub in two places (git push, create_pull); both
+    are guarded, so a caller that lost the flag cannot push a branch or open a PR."""
+    from secscan import pull_requests
+
+    class _ExplodingRepo:
+        def create_pull(self, **kwargs):
+            raise AssertionError("create_pull must never be reached during a dry run")
+
+    dryrun.activate()
+
+    with pytest.raises(dryrun.DryRunViolation):
+        await pull_requests.push_fix_branch(tmp_path, "https://github.com/octo/demo.git", "b", "tok", "m")
+    with pytest.raises(dryrun.DryRunViolation):
+        pull_requests.open_pull_request(_ExplodingRepo(), title="t", body="b", head="h", base="main", draft=False)

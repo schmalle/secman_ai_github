@@ -204,3 +204,169 @@ def test_help_mentions_engine_on_all_three_commands():
         assert result.exit_code == 0
         assert "--engine" in result.output, cmd
         assert "--codescanai-provider" in result.output, cmd
+
+
+# --- codex / kimi-cli engines ------------------------------------------------------------
+
+
+@pytest.fixture
+def codex_ready(monkeypatch):
+    from secscan import codex as codex_mod
+
+    monkeypatch.setattr(codex_mod.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk")
+
+
+@pytest.fixture
+def kimi_ready(monkeypatch):
+    from secscan import kimi_cli as kimi_mod
+
+    monkeypatch.setattr(kimi_mod.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi")
+
+
+@pytest.fixture(autouse=True)
+def _clean_cli_engine_env(monkeypatch):
+    for var in ("CODEX_BIN", "CODEX_MODEL", "KIMI_BIN", "KIMI_MODEL", "KIMI_API_KEY",
+                "KIMI_SHARE_DIR", "CODEX_HOME"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.parametrize("argv", [["scan", "octo/demo"], ["run", "--targets-only"], ["review", "."]])
+def test_engine_codex_flags_reach_config(argv, tmp_path, captured, codex_ready):
+    result = runner.invoke(
+        app,
+        argv + ["--output-dir", str(tmp_path), "--engine", "codex", "--codex-bin", "npx @openai/codex",
+                "--codex-arg=--oss", "--model", "gpt-5.4", "--skill", "owasp-top10"],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = captured["cfg"]
+    assert cfg.engine == "codex" and cfg.codescanai is None and cfg.kimi is None
+    assert cfg.codex.bin == "npx @openai/codex"
+    assert cfg.codex.extra_args == ("--oss",)
+    assert cfg.codex.model == "gpt-5.4"
+    assert [s.name for s in cfg.skills] == ["owasp-top10"]  # skills go into the prompt
+
+
+def test_engine_kimi_cli_flags_reach_config(tmp_path, captured, kimi_ready):
+    result = runner.invoke(
+        app,
+        ["scan", "octo/demo", "--output-dir", str(tmp_path), "--engine", "kimi-cli",
+         "--kimi-bin", "uvx kimi-cli", "--kimi-arg=--thinking"],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = captured["cfg"]
+    assert cfg.engine == "kimi-cli" and cfg.codex is None
+    assert cfg.kimi.bin == "uvx kimi-cli" and cfg.kimi.extra_args == ("--thinking",)
+    assert cfg.kimi.model == "kimi-for-coding" and cfg.kimi.api_key == "sk-kimi"
+
+
+def test_engine_flags_are_checked_against_the_engine(tmp_path, captured, codex_ready):
+    result = runner.invoke(
+        app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--engine", "codex", "--kimi-bin", "kimi"],
+    )
+    assert result.exit_code == 1 and "--kimi-bin" in result.output and "--engine kimi-cli" in result.output
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--codex-arg=--oss"])
+    assert result.exit_code == 1 and "--engine codex" in result.output
+    assert "cfg" not in captured
+
+
+def test_claude_provider_with_codex_is_an_error(tmp_path, captured, codex_ready):
+    result = runner.invoke(
+        app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--engine", "codex", "--provider", "openrouter"],
+    )
+    assert result.exit_code == 1 and "--provider" in result.output and "cfg" not in captured
+
+
+def test_codex_missing_credentials_fails_before_any_review(tmp_path, captured, monkeypatch):
+    from secscan import codex as codex_mod
+
+    monkeypatch.setattr(codex_mod.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nohome"))
+    result = runner.invoke(app, ["review", ".", "--output-dir", str(tmp_path), "--engine", "codex"])
+    assert result.exit_code == 1 and "codex login" in result.output and "cfg" not in captured
+
+
+def test_kimi_missing_credentials_fails_before_any_review(tmp_path, captured, monkeypatch):
+    from secscan import kimi_cli as kimi_mod
+
+    monkeypatch.setattr(kimi_mod.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path / "share"))
+    result = runner.invoke(app, ["review", ".", "--output-dir", str(tmp_path), "--engine", "kimi-cli"])
+    assert result.exit_code == 1 and "kimi login" in result.output and "cfg" not in captured
+
+
+def test_engine_env_alone_is_not_an_error(tmp_path, captured, monkeypatch):
+    monkeypatch.setenv("CODEX_BIN", "/opt/codex")
+    monkeypatch.setenv("KIMI_BIN", "/opt/kimi")
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert captured["cfg"].engine == "claude"
+
+
+# --- --fix / --create-fix-prs -------------------------------------------------------------
+
+
+def test_fix_flags_reach_config(tmp_path, captured):
+    result = runner.invoke(
+        app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--create-fix-prs", "--pr-draft", "--pr-prefix", "[acme]"],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = captured["cfg"]
+    assert cfg.fix is True and cfg.create_fix_prs is True  # --create-fix-prs implies --fix
+    assert cfg.pr_draft is True and cfg.pr_prefix == "[acme]"
+
+
+def test_fix_alone_does_not_open_prs(tmp_path, captured):
+    result = runner.invoke(app, ["run", "--targets-only", "--output-dir", str(tmp_path), "--fix"])
+    assert result.exit_code == 0, result.output
+    cfg = captured["cfg"]
+    assert cfg.fix is True and cfg.create_fix_prs is False and cfg.pr_prefix == "secscan:"
+
+
+def test_fix_defaults_off(tmp_path, captured):
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path)])
+    assert result.exit_code == 0
+    assert captured["cfg"].fix is False and captured["cfg"].create_fix_prs is False
+
+
+def test_create_fix_prs_needs_the_db(tmp_path, captured):
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--no-db", "--create-fix-prs"])
+    assert result.exit_code == 1 and "--no-db" in result.output and "--create-fix-prs" in result.output
+    result = runner.invoke(app, ["review", ".", "--output-dir", str(tmp_path), "--create-fix-prs"])
+    assert result.exit_code == 1 and "--store-db" in result.output
+    assert "cfg" not in captured
+
+
+def test_pr_draft_requires_create_fix_prs(tmp_path, captured):
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--pr-draft"])
+    assert result.exit_code == 1 and "--pr-draft" in result.output and "cfg" not in captured
+
+
+def test_fix_with_codescanai_is_an_error(tmp_path, captured, fake_bin, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk")
+    result = runner.invoke(app, ["scan", "octo/demo", "--output-dir", str(tmp_path), "--engine", "codescanai", "--fix"])
+    assert result.exit_code == 1 and "--fix" in result.output and "codescanai" in result.output
+    assert "cfg" not in captured
+
+
+def test_review_create_fix_prs_with_store_db_and_dry_run(tmp_path, captured):
+    result = runner.invoke(
+        app, ["review", ".", "--output-dir", str(tmp_path), "--store-db", "--create-fix-prs", "--dry-run",
+              "--github-api-url", "https://ghes.example.com"],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = captured["cfg"]
+    assert cfg.create_fix_prs and cfg.dry_run and cfg.no_db is False
+    assert cfg.github_api_url == "https://ghes.example.com"
+    from secscan import dryrun
+
+    assert dryrun.is_active()
+
+
+def test_help_mentions_fix_and_engines_on_all_three_commands():
+    for cmd in ("run", "scan", "review"):
+        result = runner.invoke(app, [cmd, "--help"], env={"COLUMNS": "200"})
+        assert result.exit_code == 0
+        for flag in ("--fix", "--create-fix-prs", "--codex-bin", "--kimi-bin", "--pr-prefix"):
+            assert flag in result.output, (cmd, flag)

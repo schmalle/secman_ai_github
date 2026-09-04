@@ -1,7 +1,7 @@
 [project]
 name = "secscan"
 version = "0.1.0"
-description = "Scan all reachable GitHub repositories via a GitHub App and run autonomous Claude Code security reviews, emitting High/Critical findings as CSV per repository."
+description = "Security-review local checkouts and GitHub repositories (GitHub App or PAT) with an autonomous coding agent (Claude Code, Codex CLI, Kimi CLI, CodeScanAI), emit High/Critical findings as CSV, and optionally open pull requests with fixes."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

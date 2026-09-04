@@ -185,10 +185,21 @@ class RunConfig:
     filters: Filters = field(default_factory=Filters)
     concurrency: int = 4
     # Which reviewer does the work: "claude" (Claude Code via the Agent SDK,
-    # reviewer.py) or "codescanai" (the CodeScanAI CLI, codescanai.py).
+    # reviewer.py), "codex" (OpenAI Codex CLI, codex.py), "kimi-cli" (Kimi Code
+    # CLI, kimi_cli.py) or "codescanai" (the CodeScanAI CLI, codescanai.py).
     engine: str = "claude"
-    # Resolved codescanai.CodeScanAIConfig when engine == "codescanai"; None otherwise.
-    codescanai: Any = None
+    # Resolved engine settings for the non-Claude engines; None for the others.
+    codescanai: Any = None  # codescanai.CodeScanAIConfig
+    codex: Any = None  # codex.CodexConfig
+    kimi: Any = None  # kimi_cli.KimiConfig
+    # After the review, ask the engine to remediate the High/Critical findings and
+    # write the diff as fixes.patch (fixer.py); with create_fix_prs also push it as a
+    # branch and open a pull request (pull_requests.py; an external write, dry-run
+    # guarded). Both are off by default.
+    fix: bool = False
+    create_fix_prs: bool = False
+    pr_draft: bool = False  # open fix PRs as drafts (not available on every GitHub plan)
+    pr_prefix: str = "secscan:"  # prepended to fix PR titles; empty string means no prefix
     model: str = "sonnet"
     provider: str = "auto"  # anthropic | openrouter | kimi | copilot | auto | usecc (providers.py)
     max_turns: int = 60
