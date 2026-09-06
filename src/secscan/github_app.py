@@ -33,6 +33,10 @@ class RepoInfo:
     default_branch: str
     clone_url: str
     installation_id: int
+    # Immutable repository identity from GitHub. Older callers and explicit
+    # unresolved targets may not have it, so name matching remains a constrained
+    # fallback within the same GitHub instance.
+    github_repo_id: int | None = None
 
     @classmethod
     def from_github_repo(cls, repo, installation_id: int) -> "RepoInfo":
@@ -46,6 +50,7 @@ class RepoInfo:
             default_branch=repo.default_branch or "",
             clone_url=repo.clone_url,
             installation_id=installation_id,
+            github_repo_id=(int(repo.id) if getattr(repo, "id", None) is not None else None),
         )
 
 

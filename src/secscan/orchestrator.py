@@ -20,6 +20,17 @@ from .config import DEFAULT_API_URL, RunConfig
 from .findings import Finding, write_findings_csv, write_summary_csv
 from .github_app import RepoInfo, redact_url
 from .github_auth import AuthContext, build_auth, resolve_target
+from .integration_results import (
+    IntegrationClient,
+    IntegrationContext,
+    IntegrationResultError,
+    build_run_body,
+    finding_external_id,
+    match_subject,
+    same_github_instance,
+    subject_repository_full_name,
+    validate_base_url,
+)
 from .issues import process_finding
 from .providers import ProviderEnv, model_hint, resolve_model, resolve_provider, with_model_env
 from .report_sender import send_scan_report
@@ -117,6 +128,84 @@ def _announce_dry_run(cfg: RunConfig) -> None:
     """Say so up front — the flag is a safety net, and a silent one is worthless."""
     if cfg.dry_run:
         typer.echo(dryrun.notice())
+
+
+def _prepare_integration(cfg: RunConfig, github_host) -> IntegrationContext | None:
+    """Authenticate and discover this scanner's permitted inventory subjects."""
+    if not cfg.push_to_secman or cfg.secman_scanner_id is None or cfg.dry_run:
+        return None
+    from . import secman_client
+
+    base_url = validate_base_url(cfg.secman_url)
+    token = secman_client.login(base_url, cfg.secman_username, cfg.secman_password)
+    client = IntegrationClient(base_url, token)
+    subjects = client.list_subjects(cfg.secman_scanner_id)
+    return IntegrationContext(
+        scanner_id=cfg.secman_scanner_id,
+        github_instance=github_host.web_url,
+        subjects=subjects,
+        client=client,
+    )
+
+
+def _integration_model(cfg: RunConfig) -> str | None:
+    config_name = {"kimi-cli": "kimi"}.get(cfg.engine, cfg.engine)
+    engine_cfg = getattr(cfg, config_name, None)
+    return getattr(engine_cfg, "model", None) or cfg.model
+
+
+async def _submit_integration_run(
+    cfg: RunConfig,
+    repo: RepoInfo,
+    *,
+    status: str,
+    findings: list[Finding],
+    started_at: str,
+    completed_at: str,
+    commit_sha: str | None = None,
+    store: StateStore | None = None,
+    fix_pr_url: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    context: IntegrationContext | None = cfg.integration_context
+    if context is None:
+        return
+    subject = match_subject(context.subjects, repo, context.github_instance)
+    if subject is None:
+        raise IntegrationResultError(f"no permitted SecMan subject matches {repo.full_name}")
+    issue_urls: dict[str, str] = {}
+    if store is not None:
+        from .findings import fingerprint
+
+        for finding in findings:
+            issue = store.find_issue(repo.owner, repo.name, fingerprint(finding))
+            if issue is not None:
+                issue_urls[finding_external_id(finding)] = issue.issue_url
+    run_metadata = {
+        "repository": repo.full_name,
+        "githubInstance": context.github_instance,
+        "githubRepoId": repo.github_repo_id,
+        "highCriticalOnly": True,
+    }
+    if metadata:
+        run_metadata.update(metadata)
+    body = build_run_body(
+        scanner_id=context.scanner_id,
+        subject=subject,
+        status=status,
+        findings=findings,
+        started_at=started_at,
+        completed_at=completed_at,
+        metadata=run_metadata,
+        engine=cfg.engine,
+        model=_integration_model(cfg),
+        commit_sha=commit_sha,
+        issue_urls=issue_urls,
+        fix_pr_url=fix_pr_url or None,
+    )
+    if store is not None:
+        store.record_integration_payload(repo.owner, repo.name, context.scanner_id, body)
+    await asyncio.to_thread(context.client.submit_run, body)
 
 
 def _resolve_provider_env(cfg: RunConfig) -> ProviderEnv:
@@ -263,18 +352,33 @@ async def _process_repo(
 ) -> tuple[int, int]:
     """Returns (critical, high) counts found for this repo; (0, 0) on failure."""
     owner, name = repo.owner, repo.name
+    started_at = _now()
     async with sem:
         path: Path | None = None
+        commit_sha: str | None = None
         try:
+            if store is not None:
+                context = cfg.integration_context
+                github_instance = getattr(
+                    getattr(auth, "host", None),
+                    "web_url",
+                    context.github_instance if context is not None else "",
+                )
+                store.record_github_identity(
+                    owner, name, github_instance, repo.github_repo_id
+                )
             token = await _mint_token(auth, repo)
             if store is not None:
                 store.mark(owner, name, Status.CLONED)
             path = await _clone(repo, token, _clone_root(cfg), cfg.branch)
 
-            if store is not None:
+            if store is not None or cfg.integration_context is not None:
                 commit = await head_commit(path)
                 if commit is not None:  # unreadable HEAD must never fail a scan
-                    store.record_last_commit(owner, name, commit[0], commit[1])
+                    commit_sha = commit[0]
+                    if store is not None:
+                        store.record_last_commit(owner, name, commit[0], commit[1])
+            if store is not None:
                 store.mark(owner, name, Status.REVIEWING)
             repo_out = cfg.output_dir / f"{owner}__{name}"
             res = await _review(cfg, path, repo.full_name, provider_env, repo_out)
@@ -293,12 +397,13 @@ async def _process_repo(
                 skip_verb = "would skip" if cfg.dry_run else "skipped"
                 typer.echo(f"    issues: {verb} {created}, {skip_verb} {skipped}")
 
+            fix_outcome = None
             if cfg.fix and res.high_critical:
                 # The clone is disposable, so the fixer edits it in place. The
                 # base branch is what was actually checked out — --branch, or the
                 # remote HEAD the shallow clone followed.
                 base_branch = cfg.branch or await fixer.current_branch(path) or repo.default_branch
-                await _maybe_fix(
+                fix_outcome = await _maybe_fix(
                     cfg, path, repo.full_name, res.high_critical, provider_env, repo_out,
                     store=store, repo=repo, token=token, base_branch=base_branch,
                     api_url=auth.host.api_url,
@@ -307,6 +412,17 @@ async def _process_repo(
             if res.error and not res.findings:
                 if store is not None:
                     store.record_failure(owner, name, res.error)
+                await _submit_integration_run(
+                    cfg,
+                    repo,
+                    status="FAILED",
+                    findings=[],
+                    started_at=started_at,
+                    completed_at=_now(),
+                    commit_sha=commit_sha,
+                    store=store,
+                    metadata={"outcome": "review failed"},
+                )
                 typer.echo(f"  ! {repo.full_name}: review error: {res.error}")
                 return (0, 0)
             else:
@@ -320,15 +436,40 @@ async def _process_repo(
                         cost_usd=res.cost_usd,
                         reviewed_at=_now(),
                     )
+                await _submit_integration_run(
+                    cfg,
+                    repo,
+                    status="PARTIAL" if res.error else "SUCCESS",
+                    findings=res.high_critical,
+                    started_at=started_at,
+                    completed_at=_now(),
+                    commit_sha=commit_sha,
+                    store=store,
+                    fix_pr_url=(fix_outcome.pr_url if fix_outcome else None),
+                    metadata={"totalFindings": res.total_findings},
+                )
                 branch_note = f" ({cfg.branch})" if cfg.branch else ""
                 typer.echo(
                     f"  ✓ {repo.full_name}{branch_note}: {res.critical_count} critical, "
                     f"{res.high_count} high (${res.cost_usd:.3f})"
                 )
                 return (res.critical_count, res.high_count)
+        except IntegrationResultError:
+            raise
         except Exception as exc:
             if store is not None:
                 store.record_failure(owner, name, redact_url(str(exc)))
+            await _submit_integration_run(
+                cfg,
+                repo,
+                status="FAILED",
+                findings=[],
+                started_at=started_at,
+                completed_at=_now(),
+                commit_sha=commit_sha,
+                store=store,
+                metadata={"outcome": "scan failed"},
+            )
             typer.echo(f"  ! {repo.full_name}: {redact_url(str(exc))}")
             return (0, 0)
         finally:
@@ -368,7 +509,7 @@ def _maybe_push_to_secman(cfg: RunConfig, store: StateStore | None, full_names: 
     standalone `push-to-secman` command. Runs after the findings are already
     persisted, so a push failure never costs the review.
     """
-    if not cfg.push_to_secman or store is None:
+    if not cfg.push_to_secman or cfg.secman_scanner_id is not None or store is None:
         return
     from . import secman_client, secman_push
 
@@ -396,6 +537,7 @@ async def run_scan(
 ) -> None:
     _announce_dry_run(cfg)
     auth = build_auth(cfg.github_api_url)
+    cfg.integration_context = await asyncio.to_thread(_prepare_integration, cfg, auth.host)
     store = None if cfg.no_db else StateStore(
         cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
     )
@@ -416,9 +558,58 @@ async def run_scan(
     # Explicit targets (secscan repo add) and unmatched allowlist entries join the
     # scope; they bypass Filters because they were added by hand.
     targets = store.list_targets() if store is not None else []
-    repos, unresolved = _merge_scope(repos, _load_allowlist(repos_file), targets)
+    allowlist = _load_allowlist(repos_file)
+    repos, unresolved = _merge_scope(repos, allowlist, targets)
     for owner, name in unresolved:
         repos.append(await asyncio.to_thread(resolve_target, owner, name, auth))
+
+    if cfg.integration_context is not None:
+        if not targets_only:
+            seen = {repo.full_name.lower() for repo in repos}
+            matched_subject_ids = {
+                subject.id
+                for repo in repos
+                if (
+                    subject := match_subject(
+                        cfg.integration_context.subjects,
+                        repo,
+                        cfg.integration_context.github_instance,
+                    )
+                ) is not None
+            }
+            normalized_allowlist = (
+                {item.lower() for item in allowlist} if allowlist is not None else None
+            )
+            for subject in cfg.integration_context.subjects:
+                full_name = subject_repository_full_name(subject)
+                if (
+                    full_name is None
+                    or subject.id in matched_subject_ids
+                    or full_name in seen
+                    or not same_github_instance(
+                        subject.github_instance,
+                        cfg.integration_context.github_instance,
+                    )
+                ):
+                    continue
+                owner, name = full_name.split("/", 1)
+                if org and owner.lower() != org.lower():
+                    continue
+                if normalized_allowlist is not None and full_name not in normalized_allowlist:
+                    continue
+                repos.append(await asyncio.to_thread(resolve_target, owner, name, auth))
+                seen.add(full_name)
+        permitted = []
+        for repo in repos:
+            if match_subject(
+                cfg.integration_context.subjects,
+                repo,
+                cfg.integration_context.github_instance,
+            ) is not None:
+                permitted.append(repo)
+            else:
+                typer.echo(f"  - {repo.full_name}: not a permitted SecMan scanner subject")
+        repos = permitted
 
     # Register all, then decide which to actually review (resume skips done).
     todo: list[RepoInfo] = []
@@ -426,6 +617,17 @@ async def run_scan(
         if store is not None:
             store.upsert_pending(repo.owner, repo.name)
             if cfg.resume and store.is_done(repo.owner, repo.name):
+                await _submit_integration_run(
+                    cfg,
+                    repo,
+                    status="SKIPPED",
+                    findings=[],
+                    started_at=_now(),
+                    completed_at=_now(),
+                    commit_sha=store.get(repo.owner, repo.name).last_commit_sha or None,
+                    store=store,
+                    metadata={"outcome": "resume skipped"},
+                )
                 continue
         todo.append(repo)
 
@@ -574,12 +776,19 @@ async def scan_repo(cfg: RunConfig, owner: str, name: str) -> None:
     """Clone, review, and record one remote repo by name (no enumeration)."""
     _announce_dry_run(cfg)
     auth = build_auth(cfg.github_api_url)
+    cfg.integration_context = await asyncio.to_thread(_prepare_integration, cfg, auth.host)
     store = None if cfg.no_db else StateStore(
         cfg.state_target, db_user=cfg.db_user, db_password=cfg.db_password, db_ssl=cfg.db_ssl
     )
     provider_env = _resolve_provider_env(cfg)
 
     repo = await asyncio.to_thread(resolve_target, owner, name, auth)
+    if cfg.integration_context is not None and match_subject(
+        cfg.integration_context.subjects,
+        repo,
+        cfg.integration_context.github_instance,
+    ) is None:
+        raise IntegrationResultError(f"no permitted SecMan subject matches {repo.full_name}")
     if store is not None:
         store.upsert_pending(owner, name)
 

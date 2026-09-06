@@ -133,8 +133,9 @@ the environment only and never written to disk.
 | `SMTP_HOST` / `SMTP_PORT` | SMTP server for `--email-provider custom` (port defaults to 587) |
 | `SMTP_FROM` | From address (defaults to `SMTP_USERNAME`) |
 | `SECMAN_URL` | secman base URL (or `--secman-url`), for `push-to-secman` and `scan`/`run --push-to-secman` |
-| `SECMAN_USERNAME` | secman username (or `--secman-username`); needs ADMIN or VULN role |
+| `SECMAN_USERNAME` | secman username (or `--secman-username`); legacy mode needs ADMIN or VULN, version 1 needs the scanner's assigned service user |
 | `SECMAN_PASSWORD` | secman password. No `--secman-password` flag — env only, so the password never reaches argv/`ps` |
+| `SECMAN_SCANNER_ID` | Registered integration scanner ID (or `--secman-scanner-id`). With the explicit `--push-to-secman` trigger, selects `/api/integrations/v1`; unset preserves legacy `cli-add` |
 | `SECSCAN_DRY_RUN` | `1`/`true`/`yes`/`on` forces `--dry-run` on `run`, `scan`, and `push-to-secman` |
 
 ## Usage
@@ -175,6 +176,7 @@ uv run secscan run --org my-org --email-to sec@example.com --email-provider gmai
 uv run secscan push-to-secman                              # push High/Critical findings to secman
 uv run secscan push-to-secman --dry-run                    # preview only
 uv run secscan scan octo/webapp --push-to-secman           # review and push, in one step
+uv run secscan scan octo/webapp --push-to-secman --secman-scanner-id 17  # central v1 result
 uv run secscan run --targets-only --push-to-secman         # same for a whole run
 uv run secscan run --dry-run                               # no issues opened, nothing pushed to secman
 uv run secscan scan octo/webapp --engine codex             # review with the OpenAI Codex CLI
@@ -187,7 +189,7 @@ uv run secscan review ./repo --engine codescanai --codescanai-provider custom \
 ```
 
 Common flags: `--include-archived --include-forks --max-size-mb --concurrency
---engine --model --provider --skill --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-ssl --no-db --store-db --create-issues --fix --create-fix-prs --pr-draft --pr-prefix --push-to-secman --secman-url --secman-username --dry-run --issue-prefix --keep-clones
+--engine --model --provider --skill --max-turns --max-cost-usd --timeout --output-dir --db-url --db-user --db-ssl --no-db --store-db --create-issues --fix --create-fix-prs --pr-draft --pr-prefix --push-to-secman --secman-url --secman-username --secman-scanner-id --dry-run --issue-prefix --keep-clones
 --branch --no-resume --limit --targets-only --repos-file --github-api-url --org-repos
 --format --output --no-csv --codex-bin --codex-arg --kimi-bin --kimi-arg
 --codescanai-provider --codescanai-host --codescanai-port
@@ -289,7 +291,7 @@ makes **no external writes**:
   unconditionally in a wrapper script.
 * **Nothing is written to secman.** `push-to-secman --dry-run` — and
   `scan`/`run --push-to-secman --dry-run` — list what they would push without
-  logging in or calling `cli-add` even once; because they never contact secman,
+  logging in or calling `cli-add` or `/api/integrations/v1` even once; because they never contact secman,
   they don't need `SECMAN_URL`/`SECMAN_USERNAME`/`SECMAN_PASSWORD` to be set at all.
 * **No branch is pushed and no pull request is opened.** With `--create-fix-prs`, the
   fix agent still runs and `fixes.patch` is still written locally, but the run only
@@ -554,6 +556,40 @@ the hostname); re-running after a later scan updates the existing secman
 vulnerability rather than duplicating it (secman upserts by asset + a stable
 synthetic identifier derived from the finding's fingerprint).
 
+### Central integration results (version 1)
+
+Set a registered scanner ID to select the inventory-bound version-1 transport.
+The write is still explicit: `SECMAN_SCANNER_ID` by itself never uploads;
+`--push-to-secman` or the `push-to-secman` command must also be present.
+
+```bash
+export SECMAN_SCANNER_ID=17
+uv run secscan scan octo/webapp --push-to-secman
+uv run secscan push-to-secman --secman-scanner-id 17
+```
+
+The scanner's assigned service-user credentials discover permitted subjects from
+`GET /api/integrations/v1/scanners/{id}/subjects`. Repositories match by canonical
+GitHub instance plus immutable numeric repository ID when available; a repository
+on another Enterprise host never matches even if its numeric ID or name is the
+same. `run` reviews only matched subjects, and `scan` fails before review when its
+repository is not registered.
+
+Each reviewed subject sends one atomic terminal snapshot to
+`POST /api/integrations/v1/runs`, including zero-finding successes, failed and
+resume-skipped outcomes, finding details/evidence, engine/model, commit SHA, and
+available issue/fix-PR links. Finding identity is derived from category plus the
+case-sensitive file/line location, so title and severity changes update the same
+finding. Because secscan centrally reports only High/Critical findings,
+`completeCoverage` is always `false`; it cannot resolve an absent central finding.
+The exact terminal body is retained in the local state database before upload, so
+`push-to-secman` retries the same `runKey`, timestamps, status, metadata and links.
+An ingestion rejection is reported and never falls back to legacy `cli-add`.
+
+SecMan credentials stay environment-only, TLS is required for the v1 base URL,
+and login, inventory and run requests do not follow HTTP redirects. `--dry-run`
+makes no SecMan login, inventory or submission call and needs no credentials.
+
 ```bash
 export SECMAN_URL=https://secman.example.com
 export SECMAN_USERNAME=vulnbot
@@ -578,15 +614,18 @@ uv run secscan scan octo/webapp --push-to-secman
 uv run secscan run --targets-only --push-to-secman --secman-url https://secman.example.com
 ```
 
-Only the repositories that invocation reviewed are pushed — repos skipped by
-`--resume` are not, and neither is anything else already in the state DB. Use
-`push-to-secman` for that. Credentials are validated before the review starts, so
+In legacy mode, only repositories reviewed by that invocation are pushed; repos
+skipped by `--resume` are not, and neither is anything else already in the state
+DB. Version 1 records resume skips as `SKIPPED`. Use `push-to-secman` to retry
+stored terminal bodies. Credentials are validated before the review starts, so
 a misconfigured push never wastes an LLM run; `--no-db` cannot be combined with
-`--push-to-secman`, since the push reads findings and first-seen dates from the
-state store. A login failure exits non-zero *after* `findings.csv`, state, and any
+`--push-to-secman` in legacy mode, since `cli-add` reads findings and first-seen
+dates from the state store. Version-1 uploads are built directly from the review
+and therefore also work with `--no-db` (without durable retry state). A login
+failure exits non-zero *after* `findings.csv`, state, and any
 GitHub issues are written, so nothing is lost and `push-to-secman` can retry.
 
-`--dry-run` makes zero login/`cli-add` calls, so nothing reaches secman and no
+`--dry-run` makes zero login/`cli-add`/version-1 calls, so nothing reaches secman and no
 secman credentials are needed — see [Dry run](#dry-run).
 
 **Known limitation:** secman's `cli-add` schema has no free-text field — it only

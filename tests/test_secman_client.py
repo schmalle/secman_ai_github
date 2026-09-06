@@ -19,9 +19,10 @@ class _FakeResponse:
 
 
 def test_login_extracts_token_from_set_cookie(monkeypatch):
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, timeout, allow_redirects):
         assert url == "https://secman.example.com/api/auth/login"
         assert json == {"username": "vulnbot", "password": "pw"}
+        assert allow_redirects is False
         return _FakeResponse(200, {"id": 1, "username": "vulnbot"}, headers={
             "Set-Cookie": "secman_auth=abc.def.ghi; Path=/; HttpOnly; Secure; SameSite=Lax"
         })
@@ -34,7 +35,8 @@ def test_login_extracts_token_from_set_cookie(monkeypatch):
 
 
 def test_login_401_raises_secman_push_error(monkeypatch):
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, timeout, allow_redirects):
+        assert allow_redirects is False
         return _FakeResponse(401, {"error": "Invalid credentials"})
 
     import secscan.secman_client as client
@@ -44,8 +46,20 @@ def test_login_401_raises_secman_push_error(monkeypatch):
         login("https://secman.example.com", "vulnbot", "wrongpw")
 
 
+def test_login_error_does_not_echo_remote_response_body(monkeypatch):
+    def fake_post(url, json, timeout, allow_redirects):
+        return _FakeResponse(500, {"error": "internal-secret-detail"})
+
+    import secscan.secman_client as client
+    monkeypatch.setattr(client.requests, "post", fake_post)
+
+    with pytest.raises(SecmanPushError) as exc:
+        login("https://secman.example.com", "vulnbot", "wrongpw")
+    assert "internal-secret-detail" not in str(exc.value)
+
+
 def test_login_no_cookie_raises_secman_push_error(monkeypatch):
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, timeout, allow_redirects):
         return _FakeResponse(200, {"id": 1}, headers={})
 
     import secscan.secman_client as client
@@ -58,10 +72,11 @@ def test_login_no_cookie_raises_secman_push_error(monkeypatch):
 def test_push_vulnerability_sends_bearer_and_body(monkeypatch):
     captured = {}
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(url, json, headers, timeout, allow_redirects):
         captured["url"] = url
         captured["json"] = json
         captured["headers"] = headers
+        captured["allow_redirects"] = allow_redirects
         return _FakeResponse(200, {
             "success": True, "message": "ok", "assetId": 1, "assetName": "octo/repo",
             "assetCreated": True, "vulnerabilityId": "SECSCAN:CWE-89:abc123", "id": 5,
@@ -82,11 +97,12 @@ def test_push_vulnerability_sends_bearer_and_body(monkeypatch):
         "criticality": "HIGH", "daysOpen": 3,
     }
     assert captured["headers"] == {"Authorization": "Bearer abc.def.ghi"}
+    assert captured["allow_redirects"] is False
     assert result["operation"] == "CREATED"
 
 
 def test_push_vulnerability_400_raises_without_retrying_forever(monkeypatch):
-    def fake_post(url, json, headers, timeout):
+    def fake_post(url, json, headers, timeout, allow_redirects):
         return _FakeResponse(400, {"error": "Criticality must be CRITICAL, HIGH, MEDIUM, or LOW"})
 
     import secscan.secman_client as client

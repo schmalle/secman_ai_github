@@ -44,7 +44,7 @@ from pathlib import Path
 
 import typer
 
-from .config import ConfigError, Filters, RunConfig
+from .config import ConfigError, Filters, GithubHost, RunConfig
 
 app = typer.Typer(
     add_completion=False,
@@ -193,10 +193,26 @@ def _resolve_db_ssl(db_ssl: bool) -> bool:
     return os.environ.get("DB_SSL", "").strip().lower() in ("true", "1")
 
 
+def _resolve_secman_scanner_id(value: int | None) -> int | None:
+    import os
+
+    raw = str(value) if value is not None else os.environ.get("SECMAN_SCANNER_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        scanner_id = int(raw)
+    except ValueError as exc:
+        raise ConfigError("SECMAN_SCANNER_ID must be a positive integer") from exc
+    if scanner_id < 1:
+        raise ConfigError("SECMAN_SCANNER_ID must be a positive integer")
+    return scanner_id
+
+
 _PUSH_TO_SECMAN_HELP = (
     "After the review, push this invocation's High/Critical findings to the secman "
-    "backend over HTTPS (POST /api/vulnerabilities/cli-add). Requires the DB — cannot "
-    "combine with --no-db. Needs --secman-url/--secman-username and the SECMAN_PASSWORD "
+    "backend over HTTPS. SECMAN_SCANNER_ID selects the inventory-bound version-1 run "
+    "API; otherwise legacy cli-add is used. Legacy mode requires the DB. Needs "
+    "--secman-url/--secman-username and the SECMAN_PASSWORD "
     "env var (no --secman-password flag: a CLI flag value is visible to any other local "
     "process via `ps`/`/proc/<pid>/cmdline` for as long as this process runs). Only "
     "the repositories reviewed here are pushed; use `secscan push-to-secman` for the "
@@ -204,6 +220,10 @@ _PUSH_TO_SECMAN_HELP = (
 )
 _SECMAN_URL_HELP = "secman base URL, e.g. https://secman.example.com (or SECMAN_URL env)."
 _SECMAN_USERNAME_HELP = "secman username (or SECMAN_USERNAME env); needs the ADMIN or VULN role."
+_SECMAN_SCANNER_ID_HELP = (
+    "Registered SecMan integration scanner ID (or SECMAN_SCANNER_ID env). With "
+    "--push-to-secman, selects the version-1 subject/run API instead of legacy cli-add."
+)
 
 _SECMAN_CREDS_MISSING = (
     "secman URL/username/password required "
@@ -321,6 +341,7 @@ def _run_config(
     push_to_secman: bool = False,
     secman_url: str | None = None,
     secman_username: str | None = None,
+    secman_scanner_id: int | None = None,
     dry_run: bool = False,
     issue_prefix: str = "secscan:",
     provider: str = "auto",
@@ -350,6 +371,8 @@ def _run_config(
     pr_draft: bool = False,
     pr_prefix: str = "secscan:",
 ) -> RunConfig:
+    if push_to_secman:
+        secman_scanner_id = _resolve_secman_scanner_id(secman_scanner_id)
     if no_db and create_issues:
         raise ConfigError("--no-db and --create-issues cannot be combined (issue dedup needs the DB)")
     if create_fix_prs:
@@ -362,7 +385,7 @@ def _run_config(
         raise ConfigError("--pr-draft requires --create-fix-prs")
     if no_db and email_to:
         raise ConfigError("--no-db and --email-to cannot be combined (the report is built from the state DB)")
-    if no_db and push_to_secman:
+    if no_db and push_to_secman and secman_scanner_id is None:
         raise ConfigError(
             "--no-db and --push-to-secman cannot be combined "
             "(the push reads findings and first-seen dates from the DB)"
@@ -373,8 +396,10 @@ def _run_config(
     # password out of argv/`ps`), so it is deliberately excluded from this check —
     # SECMAN_* in the environment is not an error, since it is often exported
     # process-wide.
-    if not push_to_secman and (secman_url or secman_username):
-        raise ConfigError("--secman-url/--secman-username require --push-to-secman")
+    if not push_to_secman and (secman_url or secman_username or secman_scanner_id is not None):
+        raise ConfigError(
+            "--secman-url/--secman-username/--secman-scanner-id require --push-to-secman"
+        )
     secman_password: str | None = None
     if push_to_secman:
         from .secman_push import resolve_credentials
@@ -423,6 +448,7 @@ def _run_config(
         secman_url=secman_url,
         secman_username=secman_username,
         secman_password=secman_password,
+        secman_scanner_id=secman_scanner_id,
         dry_run=dry_run,
         issue_prefix=issue_prefix.strip(),
         filters=Filters(
@@ -601,6 +627,7 @@ def run(
     push_to_secman: bool = typer.Option(False, "--push-to-secman", help=_PUSH_TO_SECMAN_HELP),
     secman_url: str = typer.Option(None, "--secman-url", help=_SECMAN_URL_HELP),
     secman_username: str = typer.Option(None, "--secman-username", help=_SECMAN_USERNAME_HELP),
+    secman_scanner_id: int = typer.Option(None, "--secman-scanner-id", help=_SECMAN_SCANNER_ID_HELP),
     dry_run: bool = typer.Option(False, "--dry-run", help=_DRY_RUN_HELP),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     concurrency: int = typer.Option(4, help="Max repos reviewed in parallel."),
@@ -668,7 +695,7 @@ def run(
             db_url=_resolve_db_url(db_url), db_user=db_user, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
-            secman_username=secman_username,
+            secman_username=secman_username, secman_scanner_id=secman_scanner_id,
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -687,7 +714,16 @@ def run(
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
-    asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
+    try:
+        asyncio.run(run_scan(cfg, org=org, repos_file=repos_file, targets_only=targets_only))
+    except Exception as exc:
+        from .integration_results import IntegrationResultError
+        from .secman_client import SecmanPushError
+
+        if not isinstance(exc, (IntegrationResultError, SecmanPushError)):
+            raise
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command("list-repos")
@@ -999,6 +1035,7 @@ def scan(
     push_to_secman: bool = typer.Option(False, "--push-to-secman", help=_PUSH_TO_SECMAN_HELP),
     secman_url: str = typer.Option(None, "--secman-url", help=_SECMAN_URL_HELP),
     secman_username: str = typer.Option(None, "--secman-username", help=_SECMAN_USERNAME_HELP),
+    secman_scanner_id: int = typer.Option(None, "--secman-scanner-id", help=_SECMAN_SCANNER_ID_HELP),
     dry_run: bool = typer.Option(False, "--dry-run", help=_DRY_RUN_HELP),
     issue_prefix: str = typer.Option("secscan:", "--issue-prefix", help="Prefix for issue titles opened by --create-issues; an empty string means no prefix."),
     model: str = typer.Option("sonnet", help=_MODEL_HELP),
@@ -1063,7 +1100,7 @@ def scan(
             db_url=_resolve_db_url(db_url), db_user=db_user, db_ssl=db_ssl,
             no_db=no_db, create_issues=create_issues, dry_run=_enter_dry_run(dry_run),
             push_to_secman=push_to_secman, secman_url=secman_url,
-            secman_username=secman_username,
+            secman_username=secman_username, secman_scanner_id=secman_scanner_id,
             issue_prefix=issue_prefix,
             provider=provider, timeout_s=timeout, branch=branch,
             email_to=email_to, email_provider=email_provider,
@@ -1082,7 +1119,16 @@ def scan(
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
-    asyncio.run(scan_repo(cfg, owner, name))
+    try:
+        asyncio.run(scan_repo(cfg, owner, name))
+    except Exception as exc:
+        from .integration_results import IntegrationResultError
+        from .secman_client import SecmanPushError
+
+        if not isinstance(exc, (IntegrationResultError, SecmanPushError)):
+            raise
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -1344,6 +1390,8 @@ def send_report(
 def push_to_secman(
     secman_url: str = typer.Option(None, "--secman-url", help="secman base URL (or SECMAN_URL env)."),
     secman_username: str = typer.Option(None, "--secman-username", help="secman username (or SECMAN_USERNAME env)."),
+    secman_scanner_id: int = typer.Option(None, "--secman-scanner-id", help=_SECMAN_SCANNER_ID_HELP),
+    github_api_url: str = typer.Option(None, "--github-api-url", help=_GITHUB_API_URL_HELP),
     dry_run: bool = typer.Option(
         False, "--dry-run",
         help=(
@@ -1356,8 +1404,8 @@ def push_to_secman(
     db_user: str = typer.Option(None, help="MySQL/MariaDB username (or DB_USERNAME env)."),
     db_ssl: bool = typer.Option(False, help="Encrypt the MySQL/MariaDB connection (or DB_SSL=true env)."),
 ) -> None:
-    """Push High/Critical findings from the state DB into secman via cli-add."""
-    from . import secman_client, secman_push
+    """Push stored High/Critical findings through legacy cli-add or version-1 runs."""
+    from . import integration_results, secman_client, secman_push
 
     dry_run = _enter_dry_run(dry_run)
 
@@ -1377,11 +1425,23 @@ def push_to_secman(
     store = _open_store(output_dir, db_url, db_user, None, db_ssl)
 
     try:
-        pushed, failed = secman_push.push_records(
-            store, store.all_records(),
-            url=url, username=username, password=password, dry_run=dry_run,
-        )
-    except secman_client.SecmanPushError as exc:
+        scanner_id = _resolve_secman_scanner_id(secman_scanner_id)
+        if scanner_id is None:
+            pushed, failed = secman_push.push_records(
+                store, store.all_records(),
+                url=url, username=username, password=password, dry_run=dry_run,
+            )
+        else:
+            pushed, failed = integration_results.push_stored_records(
+                store,
+                url=url,
+                username=username,
+                password=password,
+                scanner_id=scanner_id,
+                github_instance=GithubHost.resolve(github_api_url).web_url,
+                dry_run=dry_run,
+            )
+    except (ConfigError, secman_client.SecmanPushError, integration_results.IntegrationResultError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
 

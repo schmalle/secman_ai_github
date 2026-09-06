@@ -10,6 +10,7 @@ anything else is a SQLite file path (the default).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import urllib.parse
@@ -46,6 +47,8 @@ class RepoRecord:
     error: str = ""
     last_commit_sha: str = ""
     last_commit_date: str = ""
+    github_instance: str = ""
+    github_repo_id: int | None = None
 
     @property
     def full_name(self) -> str:
@@ -89,6 +92,8 @@ CREATE TABLE IF NOT EXISTS repos (
     error          TEXT NOT NULL DEFAULT '',
     last_commit_sha  TEXT NOT NULL DEFAULT '',
     last_commit_date TEXT NOT NULL DEFAULT '',
+    github_instance  TEXT NOT NULL DEFAULT '',
+    github_repo_id   INTEGER,
     PRIMARY KEY (owner, repo)
 );
 """
@@ -107,6 +112,8 @@ CREATE TABLE IF NOT EXISTS repos (
     error          TEXT,
     last_commit_sha  VARCHAR(64) NOT NULL DEFAULT '',
     last_commit_date VARCHAR(32) NOT NULL DEFAULT '',
+    github_instance  VARCHAR(512) NOT NULL DEFAULT '',
+    github_repo_id   BIGINT,
     PRIMARY KEY (owner, repo)
 );
 """
@@ -221,6 +228,27 @@ CREATE TABLE IF NOT EXISTS fix_prs (
 """
 
 
+_INTEGRATION_PAYLOADS_SQLITE = """
+CREATE TABLE IF NOT EXISTS integration_payloads (
+    owner        TEXT NOT NULL,
+    repo         TEXT NOT NULL,
+    scanner_id   INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (owner, repo, scanner_id)
+);
+"""
+
+_INTEGRATION_PAYLOADS_MYSQL = """
+CREATE TABLE IF NOT EXISTS integration_payloads (
+    owner        VARCHAR(255) NOT NULL,
+    repo         VARCHAR(255) NOT NULL,
+    scanner_id   BIGINT NOT NULL,
+    payload_json LONGTEXT NOT NULL,
+    PRIMARY KEY (owner, repo, scanner_id)
+);
+"""
+
+
 _GITHUB_USERS_SQLITE = """
 CREATE TABLE IF NOT EXISTS github_users (
     org        TEXT NOT NULL,
@@ -267,11 +295,15 @@ CREATE TABLE IF NOT EXISTS github_users (
 _MIGRATIONS_SQLITE = (
     "ALTER TABLE repos ADD COLUMN last_commit_sha TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE repos ADD COLUMN last_commit_date TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE repos ADD COLUMN github_instance TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE repos ADD COLUMN github_repo_id INTEGER",
 )
 
 _MIGRATIONS_MYSQL = (
     "ALTER TABLE repos ADD COLUMN last_commit_sha VARCHAR(64) NOT NULL DEFAULT ''",
     "ALTER TABLE repos ADD COLUMN last_commit_date VARCHAR(32) NOT NULL DEFAULT ''",
+    "ALTER TABLE repos ADD COLUMN github_instance VARCHAR(512) NOT NULL DEFAULT ''",
+    "ALTER TABLE repos ADD COLUMN github_repo_id BIGINT",
 )
 
 
@@ -288,7 +320,7 @@ _SQLITE_DIALECT = _Dialect(
     insert_ignore="INSERT OR IGNORE INTO",
     schema=(
         _REPOS_SQLITE, _FINDINGS_SQLITE, _TARGETS_SQLITE, _ISSUE_TRACKING_SQLITE,
-        _GITHUB_USERS_SQLITE, _FIX_PRS_SQLITE,
+        _GITHUB_USERS_SQLITE, _FIX_PRS_SQLITE, _INTEGRATION_PAYLOADS_SQLITE,
     ),
     migrations=_MIGRATIONS_SQLITE,
 )
@@ -298,7 +330,7 @@ _MYSQL_DIALECT = _Dialect(
     insert_ignore="INSERT IGNORE INTO",
     schema=(
         _REPOS_MYSQL, _FINDINGS_MYSQL, _TARGETS_MYSQL, _ISSUE_TRACKING_MYSQL,
-        _GITHUB_USERS_MYSQL, _FIX_PRS_MYSQL,
+        _GITHUB_USERS_MYSQL, _FIX_PRS_MYSQL, _INTEGRATION_PAYLOADS_MYSQL,
     ),
     migrations=_MIGRATIONS_MYSQL,
 )
@@ -512,8 +544,60 @@ class StateStore:
             (sha, date, owner, repo),
         )
 
+    def record_github_identity(
+        self,
+        owner: str,
+        repo: str,
+        instance: str,
+        github_repo_id: int | None,
+    ) -> None:
+        """Persist immutable repository identity for later central-result replay."""
+        self.upsert_pending(owner, repo)
+        self._exec(
+            "UPDATE repos SET github_instance = ?, github_repo_id = ? "
+            "WHERE owner = ? AND repo = ?",
+            (instance, github_repo_id, owner, repo),
+        )
+
     def record_failure(self, owner: str, repo: str, error: str) -> None:
         self.mark(owner, repo, Status.FAILED, error=error)
+
+    def record_integration_payload(
+        self, owner: str, repo: str, scanner_id: int, body: dict
+    ) -> None:
+        """Persist the exact terminal body so a later retry keeps its runKey."""
+        conn = self._active_conn
+        cur = conn.cursor()
+        cur.execute(
+            self._ph(
+                "DELETE FROM integration_payloads "
+                "WHERE owner = ? AND repo = ? AND scanner_id = ?"
+            ),
+            (owner, repo, scanner_id),
+        )
+        cur.execute(
+            self._ph(
+                "INSERT INTO integration_payloads "
+                "(owner, repo, scanner_id, payload_json) VALUES (?, ?, ?, ?)"
+            ),
+            (
+                owner,
+                repo,
+                scanner_id,
+                json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+
+    def get_integration_payload(
+        self, owner: str, repo: str, scanner_id: int
+    ) -> dict | None:
+        row = self._exec(
+            "SELECT payload_json FROM integration_payloads "
+            "WHERE owner = ? AND repo = ? AND scanner_id = ?",
+            (owner, repo, scanner_id),
+        ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
 
     _FINDING_COLS = (
         "owner", "repo", "severity", "title", "category",
@@ -553,6 +637,7 @@ class StateStore:
         findings_deleted = cur.rowcount
         cur.execute("DELETE FROM repos")
         repos_deleted = cur.rowcount
+        cur.execute("DELETE FROM integration_payloads")
         self._conn.commit()
         return (max(repos_deleted, 0), max(findings_deleted, 0))
 
@@ -768,4 +853,6 @@ class StateStore:
             error=row["error"] or "",
             last_commit_sha=row["last_commit_sha"] or "",
             last_commit_date=row["last_commit_date"] or "",
+            github_instance=row["github_instance"] or "",
+            github_repo_id=row["github_repo_id"],
         )

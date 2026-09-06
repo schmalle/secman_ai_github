@@ -178,6 +178,11 @@ class RunConfig:
     secman_url: str | None = None
     secman_username: str | None = None
     secman_password: str | None = None
+    # Selects the version-1 integration-run transport when --push-to-secman is on.
+    # None preserves the legacy /api/vulnerabilities/cli-add transport.
+    secman_scanner_id: int | None = None
+    # Runtime-only context populated after authenticated subject discovery.
+    integration_context: Any = None
     # No external writes: no GitHub issues are opened and nothing is pushed to secman.
     # Reviews still run and local CSV/state is still written; see dryrun.py.
     dry_run: bool = False

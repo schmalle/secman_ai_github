@@ -109,6 +109,32 @@ def test_record_last_commit_round_trip(tmp_path):
     assert rec.last_commit_date == "2026-07-15"
 
 
+def test_record_github_identity_round_trip(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    store.record_github_identity("octo", "repo", "https://github.example.com", 12345)
+    rec = store.get("octo", "repo")
+    assert rec.github_instance == "https://github.example.com"
+    assert rec.github_repo_id == 12345
+
+
+def test_integration_payload_round_trip_preserves_exact_retry_body(tmp_path):
+    store = StateStore(tmp_path / "s.sqlite3")
+    body = {
+        "scannerId": 9,
+        "subjectId": 7,
+        "runKey": "stable-key",
+        "status": "PARTIAL",
+        "completeCoverage": False,
+        "startedAt": "2026-09-06T10:00:00Z",
+        "completedAt": "2026-09-06T10:01:00Z",
+        "metadataJson": "{}",
+        "findings": [],
+    }
+    store.record_integration_payload("octo", "repo", 9, body)
+
+    assert store.get_integration_payload("octo", "repo", 9) == body
+
+
 def test_record_last_commit_creates_pending_row_for_unknown_repo(tmp_path):
     store = StateStore(tmp_path / "s.sqlite3")
     store.record_last_commit("octo", "unseen", "a1b2c3d4e5f6", "2026-07-15")
@@ -165,6 +191,8 @@ def test_opening_legacy_db_adds_last_commit_columns(tmp_path):
     rec = store.get("octo", "old")
     assert rec.last_commit_sha == "a1b2c3d4e5f6"
     assert rec.status == Status.DONE  # the pre-existing row survived the migration
+    assert rec.github_instance == ""
+    assert rec.github_repo_id is None
 
 
 def test_migration_is_idempotent_across_instances(tmp_path):

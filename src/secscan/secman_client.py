@@ -43,9 +43,10 @@ def login(base_url: str, username: str, password: str) -> str:
         f"{base_url}/api/auth/login",
         json={"username": username, "password": password},
         timeout=_TIMEOUT_S,
+        allow_redirects=False,
     )
     if resp.status_code != 200:
-        raise SecmanPushError(f"secman login failed: {resp.status_code} {resp.text[:300]}")
+        raise SecmanPushError(f"secman login failed with HTTP {resp.status_code}")
 
     set_cookie = resp.headers.get("Set-Cookie", "")
     token = _extract_cookie_token(set_cookie)
@@ -71,7 +72,8 @@ def push_vulnerability(
         json={"hostname": hostname, "cve": cve, "criticality": criticality, "daysOpen": days_open},
         headers={"Authorization": f"Bearer {token}"},
         timeout=_TIMEOUT_S,
+        allow_redirects=False,
     )
     if resp.status_code != 200:
-        raise SecmanPushError(f"cli-add failed: {resp.status_code} {resp.text[:300]}")
+        raise SecmanPushError(f"cli-add failed with HTTP {resp.status_code}")
     return resp.json()
