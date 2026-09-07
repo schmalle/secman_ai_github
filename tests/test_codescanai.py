@@ -9,6 +9,7 @@ suite stays offline and deterministic.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import textwrap
 from pathlib import Path
@@ -19,6 +20,7 @@ from secscan import codescanai
 from secscan.codescanai import (
     CUSTOM_PLACEHOLDER_TOKEN,
     CodeScanAIConfig,
+    _export_tree,
     build_command,
     map_severity,
     parse_report,
@@ -487,6 +489,39 @@ async def test_review_repo_scans_a_copy_without_dot_git(fake_scanner, monkeypatc
     assert scanned != repo and not scanned.exists()  # temp copy, cleaned up
     assert log["env"]["OPENAI_API_KEY"] == "sk"
     assert "GITHUB_TOKEN" not in log["env"]
+
+
+def test_export_tree_drops_symlinks_escaping_the_repo(tmp_path):
+    """A checked-out symlink pointing outside the repo must not survive the copy.
+
+    CodeScanAI reads every file it finds and sends the content to an LLM API; a
+    malicious repo could otherwise use a symlink to exfiltrate host files the
+    process can read (~/.ssh, /etc/passwd, ...) the moment it is scanned.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (repo / "README.md").write_text("hi\n")
+    (repo / "sub").mkdir()
+    (repo / "sub" / "real.txt").write_text("in-tree content\n")
+    (repo / "inside-link.txt").symlink_to(repo / "sub" / "real.txt")
+
+    secret = tmp_path / "outside" / "secret.txt"
+    secret.parent.mkdir()
+    secret.write_text("TOP-SECRET-HOST-FILE-CONTENT\n")
+    (repo / "escape-link.txt").symlink_to(secret)
+    (repo / "escape-relative.txt").symlink_to(Path("../../outside/secret.txt"))
+
+    dest, tmp = _export_tree(repo)
+    try:
+        names = {p.relative_to(dest) for p in dest.rglob("*")}
+        assert Path("escape-link.txt") not in names
+        assert Path("escape-relative.txt") not in names
+        assert (dest / "inside-link.txt").read_text() == "in-tree content\n"
+        assert (dest / "README.md").exists()
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 async def test_review_repo_scans_in_place_without_dot_git(fake_scanner, tmp_path, monkeypatch):

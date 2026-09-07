@@ -451,20 +451,58 @@ def parse_report(text: str, default_severity: Severity = DEFAULT_SEVERITY) -> li
 # --- running it ----------------------------------------------------------------
 
 
+def _escapes_tree(entry: Path, root: Path) -> bool:
+    """True if the symlink `entry` resolves to a target outside `root`.
+
+    A resolved, nonexistent target still compares correctly: `Path.resolve()`
+    normalizes `..` components without requiring the target to exist.
+    """
+    try:
+        entry.resolve().relative_to(root)
+    except ValueError:
+        return True
+    return False
+
+
+def _skip_escaping_symlinks(root: Path):
+    """`shutil.copytree` ignore-callback: drop `.git` and any symlink escaping `root`.
+
+    A scanned repository is untrusted content and git happily checks out a
+    symlink whose target is an absolute host path (or a relative `../../...`
+    one) — CodeScanAI then walks the copy and reads every file it finds to send
+    to an LLM API, so a symlink secscan preserved as-is would exfiltrate
+    whatever the process can read (`~/.ssh/id_rsa`, `/etc/passwd`, secscan's own
+    credentials elsewhere on disk) to that third party. Symlinks that stay
+    inside the tree are ordinary repository content and are copied untouched.
+    """
+
+    def ignore(dir_: str, names: list[str]) -> set[str]:
+        skip = {".git"} if Path(dir_) == root else set()
+        for name in names:
+            full = Path(dir_) / name
+            if full.is_symlink() and _escapes_tree(full, root):
+                skip.add(name)
+        return skip
+
+    return ignore
+
+
 def _export_tree(repo_dir: Path) -> tuple[Path, str | None]:
     """A `.git`-free copy of the tree to scan, or the directory itself.
 
     CodeScanAI walks every file under `--directory`, and each text file is one model
     call: a fresh clone's `.git/` (config, hook samples, refs) would cost a dozen
     calls per repo and can only produce noise. Directories without `.git` are
-    scanned in place.
+    scanned in place. Symlinks that escape `repo_dir` are dropped from the copy
+    rather than followed — see `_skip_escaping_symlinks`.
     """
     if not (repo_dir / ".git").exists():
         return repo_dir, None
+    repo_dir = repo_dir.resolve()
     tmp = tempfile.mkdtemp(prefix="secscan-codescanai-")
     dest = Path(tmp) / (repo_dir.name or "repo")
     shutil.copytree(
-        repo_dir, dest, symlinks=True, ignore=shutil.ignore_patterns(".git")
+        repo_dir, dest, symlinks=True, ignore=_skip_escaping_symlinks(repo_dir)
     )
     return dest, tmp
 
