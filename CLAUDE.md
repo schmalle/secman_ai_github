@@ -6,6 +6,12 @@ High/Critical findings as CSV (+ optional SQLite/MySQL state, GitHub issues, sec
 push), and can remediate them: `--fix` produces `fixes.patch`, `--create-fix-prs`
 pushes a branch and opens a pull request.
 
+## Branch and agent guardrails
+
+- `dev` is the default and only branch for agent-authored commits unless the user explicitly names another branch. Verify the current branch before editing and before committing; never commit directly to `main` or `master` by inference.
+- Contributor/automation skills must exist in both `.claude/skills/<name>/` for Claude Code and `.agents/skills/<name>/` for Codex. Create, update, or delete both renderings in the same commit, translating harness-specific mechanics and paths.
+- `src/secscan/skills/` contains scanner prompt packs, not contributor skills; its security rules remain in the “Security skills” section below.
+
 ## Dry run — an invariant, not a convenience
 
 `--dry-run` (and `SECSCAN_DRY_RUN=1`) promises that a command performs **no
@@ -53,12 +59,13 @@ and opens the PR. Invariants:
 ## secman integration
 
 `secscan` pushes findings into [secman](https://github.com/schmalle/secman), a
-separate security requirement/vulnerability management platform, via its
-`POST /api/vulnerabilities/cli-add` endpoint. Whenever code touching that
-integration changes (the secman push command, its client, credential handling,
-or the request/response shape), **check the `secman` repository** — its API
-contract, auth requirements, or `cli-add` behavior may have moved — before
-assuming the existing integration still matches.
+separate security requirement/vulnerability management platform. The preferred
+version-1 interface discovers assigned subjects at
+`GET /api/integrations/v1/scanners/{id}/subjects` and submits one atomic run to
+`POST /api/integrations/v1/runs`; legacy mode retains
+`POST /api/vulnerabilities/cli-add`. Whenever its client, credentials, or shape
+changes, check SecMan's `docs/INTEGRATION_RESULTS.md`, canonical fixture, and
+`/integration-contract-test` skill before assuming compatibility.
 
 ## Security skills
 

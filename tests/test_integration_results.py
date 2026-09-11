@@ -37,10 +37,10 @@ def _repo(*, repo_id=123, owner="octo", name="demo"):
     )
 
 
-def _subject(*, subject_id=7, repo_id=123, instance="https://github.example.com"):
+def _subject(*, subject_id=7, scanner_id=9, repo_id=123, instance="https://github.example.com"):
     return IntegrationSubject(
         id=subject_id,
-        scanner_id=9,
+        scanner_id=scanner_id,
         asset_id=42,
         github_repository_id=81,
         name="octo/demo",
@@ -226,7 +226,7 @@ def test_committed_v1_fixture_pins_request_field_names_and_types():
     )
     body = build_run_body(
         scanner_id=1,
-        subject=_subject(subject_id=2),
+        subject=_subject(subject_id=2, scanner_id=1),
         status="SUCCESS",
         findings=[_finding()],
         started_at="2026-09-06T10:00:00Z",
